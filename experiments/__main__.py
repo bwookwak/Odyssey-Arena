@@ -1,0 +1,10 @@
+"""
+Entry point for running experiments as a module.
+
+Allows: python -m experiments.run [args]
+"""
+
+from .run import main
+
+if __name__ == '__main__':
+    main()
