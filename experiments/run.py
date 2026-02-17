@@ -45,7 +45,8 @@ class ExperimentRunner:
         
         # Initialize LLM client (if needed)
         self.llm_client = None
-        if config['agent'] == 'llm' or config['memory'] == 'reflector':
+        memory_needs_llm = config['memory'] in ['text', 'hypothesis', 'gated', 'naive', 'reflector']
+        if config['agent'] == 'llm' or memory_needs_llm:
             self.llm_client = create_llm_client(
                 provider=config.get('provider', 'vllm'),
                 model_name=config['model'],
@@ -122,19 +123,26 @@ class ExperimentRunner:
         env = create_env(
             env_type=self.config['env'],
             task_data=task_data,
-            seed=seed
+            seed=seed,
+            obs_format=self.config.get('obs_format', 'bitstring')
         )
         
         # Create memory system
-        # Pass llm_client for reflector memory type
-        memory_kwargs = {}
-        if self.config['memory'] == 'reflector':
-            memory_kwargs['llm_client'] = self.llm_client
-        memory = create_memory_system(self.config['memory'], **memory_kwargs)
+        # Pass llm_client for memory types that need it
+        memory_type = self.config['memory']
+        memory_needs_llm = memory_type in ['text', 'hypothesis', 'gated', 'naive', 'reflector']
+        
+        memory = create_memory_system(
+            memory_type,
+            llm_client=self.llm_client if memory_needs_llm else None,
+            obs_format=self.config.get('obs_format', 'bitstring'),
+            verification_mode=self.config.get('verification_mode', 'oracle')
+        )
         
         # Create intervention
         intervention_type = self.config['intervention']
-        intervention_kwargs = {}
+        intervention_kwargs = {'obs_format': self.config.get('obs_format', 'bitstring')}
+        
         if intervention_type == 'noise':
             intervention_kwargs['noise_prob'] = self.config.get('noise_p', 0.05)
         elif intervention_type == 'surgery':
@@ -151,7 +159,8 @@ class ExperimentRunner:
             agent_type=self.config['agent'],
             llm_client=self.llm_client,
             env_type=self.config['env'],
-            seed=seed
+            seed=seed,
+            prompt_template=self.config.get('prompt_template', 'research')
         )
         
         # Reset agent history (for LLM agent)
@@ -207,6 +216,13 @@ class ExperimentRunner:
             
             # Update memory (use true observation, not noisy one)
             memory.update(obs, action, obs_after, feedback)
+            
+            # Oracle verification if enabled
+            if (self.config.get('verification_mode') == 'oracle' and 
+                hasattr(memory, 'verify_with_oracle')):
+                custom_logic = env.get_custom_logic()
+                if custom_logic:
+                    memory.verify_with_oracle(custom_logic)
             
             # Record step
             episode_tracker.record_step(
@@ -312,8 +328,11 @@ def parse_args():
     
     # Memory
     parser.add_argument('--memory', type=str, default='nomem',
-                        choices=['nomem', 'naive', 'gated', 'reflector'],
-                        help='Memory system type')
+                        choices=['nomem', 'text', 'hypothesis', 'gated', 'naive', 'reflector'],
+                        help='Memory system type (text=raw text, hypothesis=structured, gated=verified)')
+    parser.add_argument('--verification_mode', type=str, default='oracle',
+                        choices=['oracle', 'llm', 'observation', 'hybrid', 'none'],
+                        help='How to verify hypotheses (oracle=ground truth rules, observation=empirical, llm=ask LLM, hybrid=oracle+llm)')
     
     # Intervention
     parser.add_argument('--intervention', type=str, default='none',
@@ -331,6 +350,14 @@ def parse_args():
                         help='Maximum steps per episode')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
+    
+    # Prompt and format options
+    parser.add_argument('--prompt_template', type=str, default='research',
+                        choices=['research', 'original'],
+                        help='Prompt template (research=concise, original=Odyssey-Arena style)')
+    parser.add_argument('--obs_format', type=str, default='bitstring',
+                        choices=['bitstring', 'emoji'],
+                        help='Observation format (bitstring="010101", emoji="💡 ○ 💡")')
     
     # Output
     parser.add_argument('--output_dir', type=str, required=True,

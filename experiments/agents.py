@@ -101,7 +101,8 @@ class LLMAgent(Agent):
         llm_client,
         env_type: str = "light",
         seed: Optional[int] = None,
-        max_history: int = 3
+        max_history: int = 3,
+        prompt_template: str = "research"
     ):
         """
         Args:
@@ -109,15 +110,17 @@ class LLMAgent(Agent):
             env_type: Environment type ('light', etc.)
             seed: Random seed
             max_history: Number of recent steps to include in prompt
+            prompt_template: Prompt template ('research' or 'original')
         """
         super().__init__(seed)
         self.llm_client = llm_client
         self.env_type = env_type
         self.name = "llm"
         self.max_history = max_history
+        self.prompt_template = prompt_template
         
         # Prompt builder
-        self.prompt_builder = PromptBuilder(env_type=env_type)
+        self.prompt_builder = PromptBuilder(env_type=env_type, template=prompt_template)
         
         # Episode history for context
         self.history = []
@@ -205,6 +208,7 @@ def create_agent(
     llm_client=None,
     env_type: str = "light",
     seed: Optional[int] = None,
+    prompt_template: str = "research",
     **kwargs
 ) -> Agent:
     """
@@ -215,6 +219,7 @@ def create_agent(
         llm_client: LLM client (required for LLMAgent)
         env_type: Environment type
         seed: Random seed
+        prompt_template: Prompt template ('research' or 'original')
         **kwargs: Additional arguments for agent
         
     Returns:
@@ -223,7 +228,8 @@ def create_agent(
     if agent_type == 'llm':
         if llm_client is None:
             raise ValueError("LLMAgent requires llm_client")
-        return LLMAgent(llm_client, env_type=env_type, seed=seed, **kwargs)
+        return LLMAgent(llm_client, env_type=env_type, seed=seed, 
+                       prompt_template=prompt_template, **kwargs)
     elif agent_type == 'random':
         return RandomAgent(seed=seed)
     elif agent_type == 'heuristic':

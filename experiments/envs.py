@@ -14,19 +14,23 @@ from LightEnv.TextEnv_v2 import LightBulbEnv
 
 class LightEnvWrapper:
     """
-    Wrapper for LightBulbEnv with normalized bit-string observations.
+    Wrapper for LightBulbEnv with configurable observation format.
     
-    Observation format: "010101" (string of 0s and 1s)
+    Observation formats:
+    - 'bitstring': "010101" (string of 0s and 1s) - default
+    - 'emoji': "💡 ○ 💡 ○ 💡 ○" (emojis, compatible with original Odyssey-Arena)
+    
     Action: integer in [0, num_bulbs)
     done: True when all bulbs are on (success)
     """
     
-    def __init__(self, custom_logic, num_bulbs, seed=None):
+    def __init__(self, custom_logic, num_bulbs, seed=None, obs_format='bitstring'):
         """
         Args:
             custom_logic: Dict mapping bulb names to boolean expressions
             num_bulbs: Number of bulbs (level)
             seed: Random seed for environment
+            obs_format: Observation format ('bitstring' or 'emoji')
         """
         self.env = LightBulbEnv(
             num_bulbs=num_bulbs,
@@ -36,6 +40,7 @@ class LightEnvWrapper:
         )
         self.num_bulbs = num_bulbs
         self.custom_logic = custom_logic
+        self.obs_format = obs_format
         
     def reset(self):
         """Reset environment and return initial observation."""
@@ -62,12 +67,24 @@ class LightEnvWrapper:
         return obs, hint, done, info
     
     def _normalize_obs(self, obs_list):
-        """Convert boolean list to bit-string: [True, False, True] -> '101'"""
-        return ''.join('1' if b else '0' for b in obs_list)
+        """
+        Convert boolean list to string based on obs_format.
+        
+        - bitstring: [True, False, True] -> '101'
+        - emoji: [True, False, True] -> '💡 ○ 💡'
+        """
+        if self.obs_format == 'emoji':
+            return ' '.join('💡' if b else '○' for b in obs_list)
+        else:  # bitstring
+            return ''.join('1' if b else '0' for b in obs_list)
     
     def get_num_actions(self):
         """Return number of valid actions."""
         return self.num_bulbs
+    
+    def get_custom_logic(self):
+        """Return custom logic (ground truth rules) for oracle verification."""
+        return self.custom_logic
 
 
 def load_light_tasks(task_file):
@@ -86,7 +103,7 @@ def load_light_tasks(task_file):
     return tasks
 
 
-def create_env(env_type, task_data, seed=None):
+def create_env(env_type, task_data, seed=None, obs_format='bitstring'):
     """
     Factory function to create environment wrappers.
     
@@ -94,6 +111,7 @@ def create_env(env_type, task_data, seed=None):
         env_type: Environment type ('light', 'energy', 'repo', 'trade')
         task_data: Task configuration dict
         seed: Random seed
+        obs_format: Observation format ('bitstring' or 'emoji')
         
     Returns:
         Environment wrapper instance
@@ -102,7 +120,8 @@ def create_env(env_type, task_data, seed=None):
         return LightEnvWrapper(
             custom_logic=task_data['custom_logic'],
             num_bulbs=task_data['level'],
-            seed=seed
+            seed=seed,
+            obs_format=obs_format
         )
     else:
         raise NotImplementedError(f"Environment {env_type} not yet implemented")

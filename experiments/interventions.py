@@ -80,8 +80,20 @@ class InjectionIntervention(Intervention):
         # Only inject patterns that are valid for this environment size
         for action, flip_idx in self.false_patterns:
             if action < num_actions and flip_idx < num_actions:
-                # Directly inject into memory store (if it has hyp_store)
-                if hasattr(memory_system, 'hyp_store'):
+                # Inject as natural language hypothesis (new format)
+                if hasattr(memory_system, 'hypotheses'):
+                    false_hypothesis = {
+                        'text': f"Toggling bulb {action} affects bulb {flip_idx}",
+                        'support': self.inject_support,
+                        'contradict': 0,
+                        'confidence': self.inject_confidence,
+                        'source': 'injection',  # Mark as injected
+                        'created_at': -1  # Before episode starts
+                    }
+                    memory_system.hypotheses.append(false_hypothesis)
+                
+                # Backward compatibility with old hyp_store format
+                elif hasattr(memory_system, 'hyp_store'):
                     key = (action, flip_idx)
                     memory_system.hyp_store[key] = {
                         'support': self.inject_support,
@@ -117,19 +129,23 @@ class NoiseIntervention(Intervention):
     
     Only applies to the agent's observation (not the actual environment state).
     This simulates noisy/unreliable perception.
+    
+    Supports both bitstring and emoji observation formats.
     """
     
     def __init__(
         self,
         seed: Optional[int] = None,
-        noise_prob: float = 0.05
+        noise_prob: float = 0.05,
+        obs_format: str = 'bitstring'
     ):
         super().__init__(seed)
         self.noise_prob = noise_prob
+        self.obs_format = obs_format
     
     def apply_to_observation(self, obs: str, step: int) -> str:
         """
-        Apply bit-flip noise to observation.
+        Apply noise to observation based on format.
         
         Args:
             obs: Original observation string
@@ -138,6 +154,13 @@ class NoiseIntervention(Intervention):
         Returns:
             Noisy observation string
         """
+        if self.obs_format == 'emoji':
+            return self._apply_noise_emoji(obs)
+        else:  # bitstring
+            return self._apply_noise_bitstring(obs)
+    
+    def _apply_noise_bitstring(self, obs: str) -> str:
+        """Apply bit-flip noise to bitstring format (e.g., "010101")."""
         noisy_bits = []
         for bit in obs:
             if self.rng.random() < self.noise_prob:
@@ -146,11 +169,24 @@ class NoiseIntervention(Intervention):
             else:
                 noisy_bits.append(bit)
         return ''.join(noisy_bits)
+    
+    def _apply_noise_emoji(self, obs: str) -> str:
+        """Apply noise to emoji format (e.g., "💡 ○ 💡 ○")."""
+        symbols = obs.split()
+        noisy_symbols = []
+        for symbol in symbols:
+            if self.rng.random() < self.noise_prob:
+                # Flip emoji
+                noisy_symbols.append('○' if symbol == '💡' else '💡')
+            else:
+                noisy_symbols.append(symbol)
+        return ' '.join(noisy_symbols)
 
 
 def create_intervention(
     intervention_type: str,
     seed: Optional[int] = None,
+    obs_format: str = 'bitstring',
     **kwargs
 ) -> Intervention:
     """
@@ -159,6 +195,7 @@ def create_intervention(
     Args:
         intervention_type: Type of intervention ('none', 'injection', 'surgery', 'noise')
         seed: Random seed for intervention
+        obs_format: Observation format ('bitstring' or 'emoji') - used by noise intervention
         **kwargs: Additional arguments for intervention
         
     Returns:
@@ -171,6 +208,6 @@ def create_intervention(
     elif intervention_type == 'surgery':
         return SurgeryIntervention(seed=seed, **kwargs)
     elif intervention_type == 'noise':
-        return NoiseIntervention(seed=seed, **kwargs)
+        return NoiseIntervention(seed=seed, obs_format=obs_format, **kwargs)
     else:
         raise ValueError(f"Unknown intervention type: {intervention_type}")

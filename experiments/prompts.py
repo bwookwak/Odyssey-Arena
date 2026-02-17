@@ -10,17 +10,23 @@ from typing import List, Dict, Any, Optional
 class PromptBuilder:
     """
     Builds prompts for LightEnv tasks with optional memory context.
+    
+    Supports multiple prompt templates for compatibility:
+    - 'research': Concise format optimized for memory experiments
+    - 'original': Original Odyssey-Arena format (compatible with existing baselines)
     """
     
-    def __init__(self, env_type: str = "light"):
+    def __init__(self, env_type: str = "light", template: str = "research"):
         """
         Args:
             env_type: Type of environment ('light', 'energy', etc.)
+            template: Prompt template ('research' or 'original')
         """
         self.env_type = env_type
+        self.template = template
         
-        # Task-specific instructions
-        self.task_instructions = {
+        # Task-specific instructions - Research template (default)
+        self.task_instructions_research = {
             "light": """You are solving a light bulb puzzle. Your goal is to turn on all bulbs.
 
 - Observation format: A string of 0s and 1s (e.g., "010101"), where 1 means ON and 0 means OFF.
@@ -31,6 +37,26 @@ class PromptBuilder:
 You must respond with ONLY a single integer (the action index). Do not include any explanation or other text.
 """
         }
+        
+        # Task-specific instructions - Original Odyssey-Arena template
+        self.task_instructions_original = {
+            "light": """You are an intelligent agent.
+
+### Goal:
+Your mission is to light on all the bulbs.
+However, the accessibility of the bulbs is based on the current condition of other bulbs.
+You need to learn the hidden rule behind the environment and complete the task.
+
+### Action Space:
+The action space is based on the index of bulbs. For example, you would like to light on / off the first bulb, you should output <action>0</action> to toggle the state of the bulb.
+"""
+        }
+        
+        # Select template
+        if template == "original":
+            self.task_instructions = self.task_instructions_original
+        else:
+            self.task_instructions = self.task_instructions_research
     
     def build_prompt(
         self,
@@ -53,6 +79,22 @@ You must respond with ONLY a single integer (the action index). Do not include a
         Returns:
             Formatted prompt string
         """
+        if self.template == "original":
+            return self._build_prompt_original(observation, num_actions, step, 
+                                               memory_context, history)
+        else:
+            return self._build_prompt_research(observation, num_actions, step, 
+                                               memory_context, history)
+    
+    def _build_prompt_research(
+        self,
+        observation: str,
+        num_actions: int,
+        step: int,
+        memory_context: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """Build research-style prompt (concise, structured)."""
         prompt_parts = []
         
         # Task instructions
@@ -84,26 +126,94 @@ You must respond with ONLY a single integer (the action index). Do not include a
         
         return "\n".join(prompt_parts)
     
-    def parse_action(self, llm_output: str, num_actions: int) -> Optional[int]:
+    def _build_prompt_original(
+        self,
+        observation: str,
+        num_actions: int,
+        step: int,
+        memory_context: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """Build original Odyssey-Arena style prompt (compatible with baselines)."""
+        prompt_parts = []
+        
+        # Task instructions
+        prompt_parts.append(self.task_instructions[self.env_type])
+        prompt_parts.append("")
+        
+        # Learned Knowledge (if available) - inserted after goal
+        if memory_context:
+            prompt_parts.append("### Learned Knowledge:")
+            prompt_parts.append(memory_context)
+            prompt_parts.append("")
+        
+        # History Action and Feedback
+        prompt_parts.append("### History Action and Feedback:")
+        if history and len(history) > 0:
+            for h in history:
+                # Original format: "Action: {action}, Feedback: {feedback}, State: {obs}"
+                prompt_parts.append(
+                    f"Action: {h['action']}, Feedback: {h['result']}, State: {h['obs']}"
+                )
+        else:
+            prompt_parts.append("(No history yet)")
+        prompt_parts.append("")
+        
+        # Current State
+        prompt_parts.append("### Current State:")
+        prompt_parts.append(observation)
+        prompt_parts.append("")
+        
+        # Instructions
+        prompt_parts.append("Now think step by step and choose the next action to act in the environment.")
+        prompt_parts.append("You are encouraged to act actively to derive the environment dynamics.")
+        prompt_parts.append("Output ONLY one action in the format: <action>n</action>")
+        
+        return "\n".join(prompt_parts)
+    
+    def parse_action(self, llm_output: str, num_actions: int, 
+                    output_format: str = None) -> Optional[int]:
         """
         Parse LLM output to extract action integer.
+        
+        Supports two formats:
+        - 'xml': Extracts from <action>n</action> tags (original Odyssey-Arena)
+        - 'integer': Extracts first integer (research format)
         
         Args:
             llm_output: Raw LLM output text
             num_actions: Number of valid actions
+            output_format: Output format ('xml' or 'integer'). 
+                          If None, auto-detects based on template.
             
         Returns:
             Parsed action integer, or None if invalid
         """
         import re
         
-        # Try to extract first integer from output
-        matches = re.findall(r'\b\d+\b', llm_output)
-        if not matches:
+        # Auto-detect format based on template if not specified
+        if output_format is None:
+            output_format = 'xml' if self.template == 'original' else 'integer'
+        
+        action_str = None
+        
+        if output_format == 'xml':
+            # Extract from <action>n</action> tags
+            m = re.search(r"<action>(.*?)</action>", llm_output, re.IGNORECASE | re.DOTALL)
+            if m:
+                action_str = m.group(1).strip()
+        else:
+            # Extract first integer
+            matches = re.findall(r'\b\d+\b', llm_output)
+            if matches:
+                action_str = matches[0]
+        
+        # Parse and validate
+        if action_str is None:
             return None
         
         try:
-            action = int(matches[0])
+            action = int(action_str)
             if 0 <= action < num_actions:
                 return action
             else:
