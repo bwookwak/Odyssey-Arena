@@ -45,7 +45,11 @@ class EpisodeMetrics:
         llm_raw_output: str,
         memory_context_len: int,
         memory_used: bool,
-        invalid_action: bool
+        invalid_action: bool,
+        memory_context: str = "",
+        model_input: str = "",
+        model_output: str = "",
+        memory_ops: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         Record a single step.
@@ -56,11 +60,15 @@ class EpisodeMetrics:
             action: Action taken (or None if invalid)
             obs_after: Observation after action
             feedback: Environment feedback
-            progress: Number of bulbs ON
+            progress: Progress value from env info (e.g. bulbs ON for light env)
             llm_raw_output: Raw LLM output
             memory_context_len: Length of memory context string
             memory_used: Whether memory was used this step
             invalid_action: Whether action was invalid
+            memory_context: Actual memory context string shown to agent (for qualitative logs / slide 6)
+            model_input: Full prompt / input sent to model (for logging and dashboard)
+            model_output: Raw model output (same as llm_raw_output, for clarity next to model_input)
+            memory_ops: Per-step memory operations (reflection, curation, verify, etc.) for dashboard
         """
         step_data = {
             'step': step,
@@ -72,7 +80,11 @@ class EpisodeMetrics:
             'llm_raw_output': llm_raw_output,
             'memory_context_len': memory_context_len,
             'memory_used': memory_used,
-            'invalid_action': invalid_action
+            'invalid_action': invalid_action,
+            'memory_context': memory_context,
+            'model_input': model_input,
+            'model_output': model_output or llm_raw_output,
+            'memory_ops': memory_ops or [],
         }
         self.steps.append(step_data)
         self.num_steps += 1

@@ -1,8 +1,9 @@
 """
 Environment wrappers for Odyssey-Arena tasks.
 
+Provides a common interface (BaseEnvWrapper) so that metrics and runners
+can rely on info['progress'] and get_ground_truth_for_verification().
 Currently implements LightEnv wrapper with normalized observations.
-Designed to be easily extended to other Odyssey-Arena environments.
 """
 
 import sys
@@ -12,7 +13,36 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from LightEnv.TextEnv_v2 import LightBulbEnv
 
 
-class LightEnvWrapper:
+class BaseEnvWrapper:
+    """
+    Base interface for environment wrappers.
+    
+    Subclasses must implement:
+    - reset() -> obs
+    - step(action) -> (obs, feedback, done, info)
+    - get_num_actions() -> int
+    info must include 'progress' (numeric) for loop/stagnation metrics.
+    get_ground_truth_for_verification() returns env-specific ground truth or None.
+    """
+    
+    def reset(self):
+        raise NotImplementedError
+    
+    def step(self, action):
+        raise NotImplementedError
+    
+    def get_num_actions(self) -> int:
+        raise NotImplementedError
+    
+    def get_ground_truth_for_verification(self):
+        """
+        Return environment-specific ground truth for hypothesis verification, or None.
+        E.g. for Light: custom_logic dict; for other envs: None or different structure.
+        """
+        return None
+
+
+class LightEnvWrapper(BaseEnvWrapper):
     """
     Wrapper for LightBulbEnv with configurable observation format.
     
@@ -84,6 +114,10 @@ class LightEnvWrapper:
     
     def get_custom_logic(self):
         """Return custom logic (ground truth rules) for oracle verification."""
+        return self.custom_logic
+    
+    def get_ground_truth_for_verification(self):
+        """Standard interface: ground truth for verification (custom_logic for light)."""
         return self.custom_logic
 
 

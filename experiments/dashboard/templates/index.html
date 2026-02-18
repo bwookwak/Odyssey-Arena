@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Experiment Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem 2rem; background: #0f0f12; color: #e0e0e0; }
+    h1 { margin-top: 0; }
+    a { color: #7cb8ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #333; }
+    th { background: #1a1a1f; color: #aaa; font-weight: 600; }
+    .status { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.85rem; }
+    .status.running { background: #2a4a2a; color: #8f8; }
+    .status.completed { background: #2a2a4a; color: #88f; }
+    .status.failed { background: #4a2a2a; color: #f88; }
+    .id { font-family: monospace; font-size: 0.85rem; color: #888; }
+    .dur { font-family: monospace; font-size: 0.9rem; color: #aaa; white-space: nowrap; }
+    .dur.live { color: #8f8; }
+    .time-cell { white-space: nowrap; }
+    .time-main { font-size: 0.95rem; }
+    .time-sub { font-size: 0.8rem; color: #777; }
+    .updated { color: #888; font-size: 0.85rem; }
+    .filter-form { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 1rem; padding: 0.75rem; background: #1a1a1f; border-radius: 6px; }
+    .filter-form label { display: flex; align-items: center; gap: 0.25rem; }
+    .filter-form input, .filter-form select { padding: 0.35rem 0.5rem; background: #0f0f12; border: 1px solid #333; color: #e0e0e0; border-radius: 4px; }
+    .filter-form input[type="text"] { min-width: 8rem; }
+    .btn { padding: 0.4rem 0.75rem; border-radius: 4px; border: none; cursor: pointer; font-size: 0.9rem; }
+    .btn-primary { background: #2a4a6a; color: #e0e0e0; }
+    .btn-primary:hover { background: #3a5a7a; }
+    .btn-danger { background: #4a2a2a; color: #f88; }
+    .btn-danger:hover { background: #5a3a3a; }
+    .actions { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; }
+    .row-actions { display: flex; gap: 0.5rem; }
+    .row-actions a.del { color: #f88; font-size: 0.85rem; }
+    th.sortable { white-space: nowrap; }
+    th.sortable a { color: #aaa; margin-left: 0.15rem; }
+    th.sortable a:hover { color: #7cb8ff; }
+    th.sortable a.active { color: #7cb8ff; }
+    .prog-cell { min-width: 130px; font-size: 0.85rem; }
+    .prog-bar-wrap { background: #222; border-radius: 4px; height: 6px; margin-top: 3px; width: 100%; }
+    .prog-bar { background: #4a8a4a; height: 6px; border-radius: 4px; transition: width 0.4s; }
+    .prog-bar.done { background: #4a4a8a; }
+    .prog-label { color: #aaa; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>Experiment Dashboard</h1>
+  <p class="updated">실험 목록 (실행 중·완료·실패 모두 유지). 대시보드에서만 제거 가능.</p>
+
+  <form class="filter-form" method="get" action="{{ url_for('index') }}">
+    <label>상태 <select name="status">
+      <option value="">전체</option>
+      <option value="running" {{ 'selected' if filter_status == 'running' else '' }}>running</option>
+      <option value="completed" {{ 'selected' if filter_status == 'completed' else '' }}>completed</option>
+      <option value="failed" {{ 'selected' if filter_status == 'failed' else '' }}>failed</option>
+    </select></label>
+    <label>이름 포함 <input type="text" name="name" value="{{ filter_name }}" placeholder="실험 이름"></label>
+    <label>시작 ≥ <input type="datetime-local" name="started_after" value="{{ filter_started_after }}"></label>
+    <label>시작 ≤ <input type="datetime-local" name="started_before" value="{{ filter_started_before }}"></label>
+    <label>종료 ≥ <input type="datetime-local" name="finished_after" value="{{ filter_finished_after }}"></label>
+    <label>종료 ≤ <input type="datetime-local" name="finished_before" value="{{ filter_finished_before }}"></label>
+    <input type="hidden" name="sort_by" value="{{ sort_by }}">
+    <input type="hidden" name="sort_order" value="{{ sort_order }}">
+    <button type="submit" class="btn btn-primary">필터 적용</button>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">초기화</a>
+  </form>
+
+  <div class="actions">
+    <button type="button" class="btn btn-danger" id="btn-delete-selected" disabled>선택 항목 대시보드에서 제거</button>
+    <span id="selected-count"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="select-all" title="전체 선택"></th>
+        <th class="sortable">이름
+          <a href="{{ sort_url('name', 'asc') }}" title="오름차순" class="{{ 'active' if sort_by == 'name' and sort_order == 'asc' else '' }}">▲</a>
+          <a href="{{ sort_url('name', 'desc') }}" title="내림차순" class="{{ 'active' if sort_by == 'name' and sort_order == 'desc' else '' }}">▼</a>
+        </th>
+        <th class="sortable">ID
+          <a href="{{ sort_url('experiment_id', 'asc') }}" title="오름차순" class="{{ 'active' if sort_by == 'experiment_id' and sort_order == 'asc' else '' }}">▲</a>
+          <a href="{{ sort_url('experiment_id', 'desc') }}" title="내림차순" class="{{ 'active' if sort_by == 'experiment_id' and sort_order == 'desc' else '' }}">▼</a>
+        </th>
+        <th class="sortable">상태
+          <a href="{{ sort_url('status', 'asc') }}" title="오름차순" class="{{ 'active' if sort_by == 'status' and sort_order == 'asc' else '' }}">▲</a>
+          <a href="{{ sort_url('status', 'desc') }}" title="내림차순" class="{{ 'active' if sort_by == 'status' and sort_order == 'desc' else '' }}">▼</a>
+        </th>
+        <th class="sortable">시작
+          <a href="{{ sort_url('started_at', 'asc') }}" title="오래된 순" class="{{ 'active' if sort_by == 'started_at' and sort_order == 'asc' else '' }}">▲</a>
+          <a href="{{ sort_url('started_at', 'desc') }}" title="최신 순" class="{{ 'active' if sort_by == 'started_at' and sort_order == 'desc' else '' }}">▼</a>
+        </th>
+        <th class="sortable">종료
+          <a href="{{ sort_url('finished_at', 'asc') }}" title="오래된 순" class="{{ 'active' if sort_by == 'finished_at' and sort_order == 'asc' else '' }}">▲</a>
+          <a href="{{ sort_url('finished_at', 'desc') }}" title="최신 순" class="{{ 'active' if sort_by == 'finished_at' and sort_order == 'desc' else '' }}">▼</a>
+        </th>
+        <th>소요시간</th>
+        <th>진행률</th>
+        <th>설정 요약</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in experiments %}
+      <tr>
+        <td><input type="checkbox" class="row-cb" value="{{ e.experiment_id }}"></td>
+        <td><a href="{{ url_for('experiment_detail', experiment_id=e.experiment_id) }}">{{ e.name or e.experiment_id }}</a></td>
+        <td class="id">{{ e.experiment_id }}</td>
+        <td><span class="status {{ e.status }}">{{ e.status }}</span></td>
+        <td class="time-cell">
+          <span class="time-main" data-iso="{{ e.started_at or '' }}">{{ e.started_at or '-' }}</span>
+        </td>
+        <td class="time-cell">
+          <span class="time-main" data-iso="{{ e.finished_at or '' }}">{{ e.finished_at or '-' }}</span>
+        </td>
+        <td class="dur {{ 'live' if e.status == 'running' else '' }}"
+            data-started="{{ e.started_at or '' }}"
+            data-finished="{{ e.finished_at or '' }}"
+            data-status="{{ e.status }}">-</td>
+        <td class="prog-cell"
+            data-expid="{{ e.experiment_id }}"
+            data-status="{{ e.status }}"
+            data-started="{{ e.started_at or '' }}">
+          {% if e.status == 'running' %}
+            <span class="prog-label">불러오는 중…</span>
+          {% else %}
+            {% set p = e._progress %}
+            {% if p and p.total_episodes %}
+              {% set ep = p.episode or 0 %}
+              {% set totalEp = p.total_episodes %}
+              {% set step = p.step or 0 %}
+              {% set maxStep = p.max_steps or 1 %}
+              {% set sr = ((p.success_rate or 0) * 100) | round | int %}
+              {% set pct = [([((ep - 1 + step / maxStep) / totalEp * 100) | round | int, 0] | max), 100] | min %}
+              <span class="prog-label">Ep {{ ep }}/{{ totalEp }}&nbsp;&nbsp;step {{ step }}/{{ maxStep }}&nbsp;&nbsp;sr={{ sr }}%</span>
+              <div class="prog-bar-wrap"><div class="prog-bar {{ 'done' if e.status == 'completed' else '' }}" style="width:{{ pct }}%"></div></div>
+            {% elif e.status == 'completed' %}
+              <span style="color:#88f">완료</span>
+            {% else %}
+              <span style="color:#f88">-</span>
+            {% endif %}
+          {% endif %}
+        </td>
+        <td>
+          {% if e.config_summary %}
+          env={{ e.config_summary.get('env', '-') }} agent={{ e.config_summary.get('agent', '-') }} model={{ e.config_summary.get('model', '-') }} ep={{ e.config_summary.get('num_episodes', '-') }}
+          {% else %}-{% endif %}
+        </td>
+        <td class="row-actions"><a href="#" class="del row-del" data-id="{{ e.experiment_id }}">제거</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="10">등록된 실험이 없습니다. run.py 또는 run_validation.sh 실행 시 자동 등록됩니다.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <script>
+    (function() {
+      // ── 시간 포맷 ──────────────────────────────────────
+      function fmtTime(isoStr) {
+        if (!isoStr) return '-';
+        var d = new Date(isoStr);
+        if (isNaN(d)) return isoStr;
+        var yyyy = d.getFullYear();
+        var MM = String(d.getMonth()+1).padStart(2,'0');
+        var dd = String(d.getDate()).padStart(2,'0');
+        var hh = String(d.getHours()).padStart(2,'0');
+        var mm = String(d.getMinutes()).padStart(2,'0');
+        var ss = String(d.getSeconds()).padStart(2,'0');
+        return yyyy + '-' + MM + '-' + dd + ' ' + hh + ':' + mm + ':' + ss;
+      }
+
+      function fmtDur(ms) {
+        if (ms < 0) ms = 0;
+        var totalSec = Math.floor(ms / 1000);
+        var m = Math.floor(totalSec / 60);
+        var s = totalSec % 60;
+        return m + 'm ' + String(s).padStart(2,'0') + 's';
+      }
+
+      // ISO time 셀 포맷
+      document.querySelectorAll('.time-main[data-iso]').forEach(function(el) {
+        var iso = el.getAttribute('data-iso');
+        el.textContent = fmtTime(iso);
+      });
+
+      // Duration 초기 렌더
+      function renderDuration(el) {
+        var started = el.getAttribute('data-started');
+        var finished = el.getAttribute('data-finished');
+        var status = el.getAttribute('data-status');
+        if (!started) { el.textContent = '-'; return; }
+        var t0 = new Date(started).getTime();
+        if (isNaN(t0)) { el.textContent = '-'; return; }
+        var t1 = (status === 'running') ? Date.now() : (finished ? new Date(finished).getTime() : Date.now());
+        el.textContent = fmtDur(t1 - t0);
+      }
+
+      var durCells = document.querySelectorAll('.dur[data-started]');
+      durCells.forEach(renderDuration);
+
+      // running인 것만 1초마다 갱신
+      var liveCells = Array.prototype.filter.call(durCells, function(el) {
+        return el.getAttribute('data-status') === 'running';
+      });
+      if (liveCells.length > 0) {
+        setInterval(function() { liveCells.forEach(renderDuration); }, 1000);
+      }
+
+      // ── 체크박스 / 삭제 ───────────────────────────────
+      var selectAll = document.getElementById('select-all');
+      var rowCbs = document.querySelectorAll('.row-cb');
+      var btnDelete = document.getElementById('btn-delete-selected');
+      var selectedCount = document.getElementById('selected-count');
+
+      function updateState() {
+        var n = document.querySelectorAll('.row-cb:checked').length;
+        btnDelete.disabled = n === 0;
+        selectedCount.textContent = n > 0 ? n + '개 선택' : '';
+        selectAll.checked = rowCbs.length > 0 && n === rowCbs.length;
+      }
+
+      if (selectAll) {
+        selectAll.addEventListener('change', function() {
+          rowCbs.forEach(function(cb) { cb.checked = selectAll.checked; });
+          updateState();
+        });
+      }
+      rowCbs.forEach(function(cb) { cb.addEventListener('change', updateState); });
+
+      function doDelete(ids) {
+        if (!ids.length) return;
+        fetch('{{ url_for("api_delete_experiments") }}', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ experiment_ids: ids })
+        }).then(function(r) { return r.json(); })
+          .then(function() { window.location.reload(); })
+          .catch(function() { alert('제거 요청 실패'); });
+      }
+
+      btnDelete.addEventListener('click', function() {
+        var ids = Array.prototype.map.call(document.querySelectorAll('.row-cb:checked'), function(c) { return c.value; });
+        if (ids.length && confirm('선택한 ' + ids.length + '개 실험을 대시보드 목록에서 제거할까요? (실제 파일은 삭제되지 않습니다)'))
+          doDelete(ids);
+      });
+
+      document.querySelectorAll('.row-del').forEach(function(a) {
+        a.addEventListener('click', function(ev) {
+          ev.preventDefault();
+          var id = a.getAttribute('data-id');
+          if (id && confirm('이 실험을 대시보드 목록에서 제거할까요?'))
+            doDelete([id]);
+        });
+      });
+
+      updateState();
+
+      // ── 진행률 폴링 (running 실험만) ───────────────────
+      var progCells = Array.prototype.filter.call(
+        document.querySelectorAll('.prog-cell[data-status="running"]'),
+        function(el) { return el.getAttribute('data-expid'); }
+      );
+
+      function fmtEta(ms) {
+        if (ms <= 0 || !isFinite(ms)) return null;
+        var totalSec = Math.floor(ms / 1000);
+        var h = Math.floor(totalSec / 3600);
+        var m = Math.floor((totalSec % 3600) / 60);
+        var s = totalSec % 60;
+        if (h > 0) return h + 'h ' + m + 'm';
+        if (m > 0) return m + 'm ' + String(s).padStart(2,'0') + 's';
+        return s + 's';
+      }
+
+      function renderProg(el, p, isDone) {
+        if (isDone) {
+          el.innerHTML = '<span style="color:#88f">완료</span>';
+          return;
+        }
+        if (!p || typeof p !== 'object' || !p.total_episodes) {
+          el.innerHTML = '<span class="prog-label">대기 중…</span>';
+          return;
+        }
+        var ep = p.episode || 0, totalEp = p.total_episodes || 1;
+        var step = p.step || 0, maxStep = p.max_steps || 1;
+        var sr = p.success_rate != null ? (p.success_rate * 100).toFixed(0) + '%' : '-';
+        var epPct = Math.round((ep - 1 + (step / maxStep)) / totalEp * 100);
+        epPct = Math.min(Math.max(epPct, 0), 99);
+
+        // ETA: steps done / elapsed → remaining time
+        var startedIso = el.getAttribute('data-started');
+        var etaStr = '';
+        if (startedIso) {
+          var t0 = new Date(startedIso).getTime();
+          var elapsed = Date.now() - t0;
+          var stepsDone = (ep - 1) * maxStep + step;
+          var totalSteps = totalEp * maxStep;
+          var stepsLeft = totalSteps - stepsDone;
+          if (stepsDone > 0 && elapsed > 0) {
+            var msPerStep = elapsed / stepsDone;
+            var etaMs = stepsLeft * msPerStep;
+            var f = fmtEta(etaMs);
+            if (f) etaStr = '&nbsp;&nbsp;ETA&nbsp;' + f;
+          }
+        }
+
+        el.innerHTML =
+          '<span class="prog-label">Ep ' + ep + '/' + totalEp +
+          '&nbsp;&nbsp;step ' + step + '/' + maxStep +
+          '&nbsp;&nbsp;sr=' + sr + etaStr + '</span>' +
+          '<div class="prog-bar-wrap"><div class="prog-bar" style="width:' + epPct + '%"></div></div>';
+      }
+
+      function pollOne(el) {
+        var id = el.getAttribute('data-expid');
+        fetch('/api/experiment/' + id + '/progress')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var done = data.status && data.status !== 'running';
+            renderProg(el, data.progress, done);
+          })
+          .catch(function() {
+            el.innerHTML = '<span class="prog-label" style="color:#888">오류</span>';
+          });
+      }
+
+      if (progCells.length > 0) {
+        progCells.forEach(pollOne);
+        setInterval(function() { progCells.forEach(pollOne); }, 5000);
+      }
+
+    })();
+  </script>
+</body>
+</html>

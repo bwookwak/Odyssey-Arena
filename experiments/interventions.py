@@ -3,13 +3,16 @@ Interventions for memory experiments.
 
 Implements different intervention strategies:
 - None: No intervention (baseline)
-- Injection: Seed false high-confidence hypotheses at episode start
+- Injection: Seed false high-confidence hypotheses at episode start (configurable patterns)
 - Surgery: Suppress memory context after certain step threshold
 - Noise: Add observation noise (flip bits with probability p)
 """
 
-from typing import Optional
+from typing import Optional, List, Tuple, Callable, TYPE_CHECKING
 import random
+
+if TYPE_CHECKING:
+    from experiments.domain import DomainAdapter
 
 
 class Intervention:
@@ -38,64 +41,81 @@ class NoIntervention(Intervention):
         super().__init__(seed)
 
 
+def _default_light_false_patterns() -> List[Tuple[int, int]]:
+    """Fallback when no domain provided (light-style defaults)."""
+    return [(1, 2), (2, 4), (3, 5)]
+
+
+def _default_light_hypothesis_text(action: int, target: int) -> str:
+    """Fallback when no domain provided."""
+    return f"Toggling bulb {action} affects bulb {target}"
+
+
 class InjectionIntervention(Intervention):
     """
     Injection intervention - seed false high-confidence hypotheses at episode start.
     
-    Injects likely-false hypotheses like:
-    - H(1->2): "Toggling bulb 1 flips bulb 2"
-    - H(2->4): "Toggling bulb 2 flips bulb 4"
-    - H(3->5): "Toggling bulb 3 flips bulb 5"
-    
-    These are seeded with high confidence (0.95), support=3, contradict=0.
+    Uses domain adapter for patterns and hypothesis text when provided;
+    otherwise uses false_patterns / hypothesis_text_fn or light defaults.
     """
     
     def __init__(
         self,
         seed: Optional[int] = None,
         inject_confidence: float = 0.95,
-        inject_support: int = 3
+        inject_support: int = 3,
+        false_patterns: Optional[List[Tuple[int, int]]] = None,
+        hypothesis_text_fn: Optional[Callable[[int, int], str]] = None,
+        domain: Optional["DomainAdapter"] = None,
     ):
         super().__init__(seed)
         self.inject_confidence = inject_confidence
         self.inject_support = inject_support
-        
-        # False hypothesis patterns: (action, flip_idx)
-        self.false_patterns = [
-            (1, 2),
-            (2, 4),
-            (3, 5)
-        ]
+        self.domain = domain
+        if false_patterns is not None:
+            self.false_patterns = false_patterns
+        elif domain is not None and domain.get_injection_false_patterns():
+            self.false_patterns = domain.get_injection_false_patterns()
+        else:
+            self.false_patterns = _default_light_false_patterns()
+        if hypothesis_text_fn is not None:
+            self.hypothesis_text_fn = hypothesis_text_fn
+        elif domain is not None:
+            self.hypothesis_text_fn = domain.format_injection_hypothesis
+        else:
+            self.hypothesis_text_fn = _default_light_hypothesis_text
     
     def apply_at_start(self, memory_system, env) -> None:
         """
         Inject false hypotheses into memory at episode start.
-        
-        Args:
-            memory_system: Memory system to inject into
-            env: Environment (to check valid indices)
+        Uses memory_system.add_hypothesis() when available.
         """
         num_actions = env.get_num_actions()
         
-        # Only inject patterns that are valid for this environment size
-        for action, flip_idx in self.false_patterns:
-            if action < num_actions and flip_idx < num_actions:
-                # Inject as natural language hypothesis (new format)
-                if hasattr(memory_system, 'hypotheses'):
-                    false_hypothesis = {
-                        'text': f"Toggling bulb {action} affects bulb {flip_idx}",
+        for action, target in self.false_patterns:
+            if action < num_actions and target < num_actions:
+                text = self.hypothesis_text_fn(action, target)
+                hyp_dict = {
+                    'text': text,
+                    'support': self.inject_support,
+                    'contradict': 0,
+                    'confidence': self.inject_confidence,
+                    'source': 'injection',
+                    'created_at': -1
+                }
+                if hasattr(memory_system, 'add_hypothesis'):
+                    memory_system.add_hypothesis(hyp_dict)
+                elif hasattr(memory_system, 'hypotheses'):
+                    memory_system.hypotheses.append({
+                        'text': text,
                         'support': self.inject_support,
                         'contradict': 0,
                         'confidence': self.inject_confidence,
-                        'source': 'injection',  # Mark as injected
-                        'created_at': -1  # Before episode starts
-                    }
-                    memory_system.hypotheses.append(false_hypothesis)
-                
-                # Backward compatibility with old hyp_store format
+                        'source': 'injection',
+                        'created_at': -1
+                    })
                 elif hasattr(memory_system, 'hyp_store'):
-                    key = (action, flip_idx)
-                    memory_system.hyp_store[key] = {
+                    memory_system.hyp_store[(action, target)] = {
                         'support': self.inject_support,
                         'contradict': 0,
                         'confidence': self.inject_confidence
@@ -204,7 +224,8 @@ def create_intervention(
     if intervention_type == 'none':
         return NoIntervention(seed=seed)
     elif intervention_type == 'injection':
-        return InjectionIntervention(seed=seed, **kwargs)
+        inj_kw = {k: v for k, v in kwargs.items() if k in ('domain', 'inject_confidence', 'inject_support', 'false_patterns', 'hypothesis_text_fn')}
+        return InjectionIntervention(seed=seed, **inj_kw)
     elif intervention_type == 'surgery':
         return SurgeryIntervention(seed=seed, **kwargs)
     elif intervention_type == 'noise':

@@ -11,3 +11,6 @@ transformers>=4.30.0
 # Visualization and utilities
 matplotlib>=3.5.0
 numpy>=1.21.0
+
+# Dashboard (optional)
+flask>=2.0.0

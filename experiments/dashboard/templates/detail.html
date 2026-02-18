@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Experiment {{ entry.experiment_id }}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem 2rem; background: #0f0f12; color: #e0e0e0; }
+    h1, h2 { margin-top: 0; }
+    a { color: #7cb8ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .status { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; }
+    .status.running { background: #2a4a2a; color: #8f8; }
+    .status.completed { background: #2a2a4a; color: #88f; }
+    .status.failed { background: #4a2a2a; color: #f88; }
+    pre { background: #1a1a1f; padding: 1rem; overflow: auto; border-radius: 6px; font-size: 0.85rem; white-space: pre-wrap; max-height: 20em; }
+    .block { margin-bottom: 1.5rem; }
+    .block h2 { margin-bottom: 0.5rem; color: #aaa; }
+    .meta { color: #888; font-size: 0.9rem; }
+    details.ep-block { margin-bottom: 0.5rem; }
+    details.ep-block summary { cursor: pointer; color: #7cb8ff; }
+    details.step-block { margin-left: 1rem; margin-bottom: 0.25rem; }
+    details.step-block summary { cursor: pointer; color: #aaa; font-size: 0.9rem; }
+    .step-inout h4 { margin: 0.5rem 0 0.25rem; color: #888; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <p><a href="{{ url_for('index') }}">← 목록</a></p>
+  <h1>{{ entry.name or entry.experiment_id }} <span class="status {{ entry.status }}">{{ entry.status }}</span></h1>
+  <p class="meta">ID: {{ entry.experiment_id }} · 시작: {{ entry.started_at }} · 종료: {{ entry.finished_at or '-' }} · 출력: {{ entry.output_dir }}</p>
+
+  <div class="block">
+    <h2>설정 (config)</h2>
+    <pre>{{ config_str or '(config.json 없음)' }}</pre>
+  </div>
+
+  <div class="block">
+    <h2>요약 (summary)</h2>
+    <pre>{{ summary_str or '(summary 없음)' }}</pre>
+  </div>
+
+  <div class="block">
+    <h2>Step별 상세 (에피소드·스텝별 Input / Output / Memory ops)</h2>
+    {% for ep in episodes %}
+    <details class="ep-block">
+      <summary>에피소드 {{ ep.episode_idx + 1 }} (level {{ ep.task_level }}) · {{ ep.num_steps }} steps · {{ '성공' if ep.success else '실패' }}</summary>
+      {% for s in ep.steps %}
+      <details class="step-block">
+        <summary>Step {{ s.step }} · action={{ s.action }} · progress={{ s.progress }} · mem={{ s.memory_used }}</summary>
+        <div class="step-inout">
+          <h4>Input (to model)</h4>
+          <pre>{{ s.model_input or '(없음)' }}</pre>
+          <h4>Output</h4>
+          <pre>{{ s.model_output or s.llm_raw_output or '(없음)' }}</pre>
+          {% if s.memory_ops %}
+          <h4>Memory ops</h4>
+          <pre>{{ s.memory_ops | tojson }}</pre>
+          {% endif %}
+        </div>
+      </details>
+      {% endfor %}
+    </details>
+    {% else %}
+    <p>episodes.json 없거나 비어 있음.</p>
+    {% endfor %}
+  </div>
+
+  <div class="block">
+    <h2>로그 (run.log, 최근)</h2>
+    <pre>{{ log_content }}</pre>
+  </div>
+</body>
+</html>

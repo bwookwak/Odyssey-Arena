@@ -1,0 +1,28 @@
+{
+  "experiment_id": "exp_20260218_174739_599681",
+  "name": "gpt-4o-nomem",
+  "status": "completed",
+  "started_at": "2026-02-18T17:47:39.599710Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4o",
+    "memory": "nomem",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 3,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-18T17:53:59.019621Z",
+  "summary": {
+    "num_episodes": 3,
+    "num_success": 0,
+    "success_rate": 0.0,
+    "avg_steps_all": 200.0,
+    "avg_steps_success": 0.0,
+    "avg_loop_ratio": 0.4566666666666667,
+    "avg_memory_usage_rate": 0.0,
+    "avg_invalid_action_rate": 0.0
+  }
+}

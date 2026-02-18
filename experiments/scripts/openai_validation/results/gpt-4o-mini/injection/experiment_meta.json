@@ -1,0 +1,18 @@
+{
+  "experiment_id": "exp_20260218_181122_862465",
+  "name": "gpt-4o-mini-injection",
+  "status": "failed",
+  "started_at": "2026-02-18T18:11:22.862498Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4o-mini",
+    "memory": "naive",
+    "verification_mode": "none",
+    "intervention": "injection",
+    "num_episodes": 3,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-18T18:36:45.510034Z"
+}

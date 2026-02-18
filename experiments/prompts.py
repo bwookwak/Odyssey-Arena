@@ -33,8 +33,6 @@ class PromptBuilder:
 - Action: Choose a bulb index to toggle (integer from 0 to num_bulbs-1).
 - Rules: Each bulb can only be toggled if certain conditions are met based on other bulbs' states.
 - Strategy: Experiment to learn which actions work in which states, then use that knowledge.
-
-You must respond with ONLY a single integer (the action index). Do not include any explanation or other text.
 """
         }
         
@@ -107,22 +105,23 @@ The action space is based on the index of bulbs. For example, you would like to 
             prompt_parts.append(memory_context)
             prompt_parts.append("")
         
-        # Recent history (optional, last 3 steps)
+        # Recent history (optional)
         if history and len(history) > 0:
             prompt_parts.append("=== RECENT HISTORY ===")
-            for i, h in enumerate(history[-3:]):
-                prompt_parts.append(
-                    f"Step {h['step']}: State={h['obs']}, Action={h['action']} -> {h['result']}"
-                )
+            for h in history:
+                line = f"Step {h['step']}: State={h['obs']}, Action={h['action']} -> {h['result']}"
+                if h.get('think'):
+                    line += f"\n  Reasoning: {h['think']}"
+                prompt_parts.append(line)
             prompt_parts.append("")
-        
+
         # Current situation
         prompt_parts.append("=== CURRENT SITUATION ===")
         prompt_parts.append(f"Step: {step}")
         prompt_parts.append(f"Current state: {observation}")
         prompt_parts.append(f"Valid actions: 0 to {num_actions - 1}")
         prompt_parts.append("")
-        prompt_parts.append("Your action (single integer only):")
+        prompt_parts.append("Think step by step about the best action, then output your action in the format: <action>n</action>")
         
         return "\n".join(prompt_parts)
     
@@ -191,9 +190,9 @@ The action space is based on the index of bulbs. For example, you would like to 
         """
         import re
         
-        # Auto-detect format based on template if not specified
+        # Auto-detect format: both templates now use <action> xml tags
         if output_format is None:
-            output_format = 'xml' if self.template == 'original' else 'integer'
+            output_format = 'xml'
         
         action_str = None
         
@@ -220,6 +219,39 @@ The action space is based on the index of bulbs. For example, you would like to 
                 return None
         except (ValueError, IndexError):
             return None
+
+
+    def parse_think_and_action(self, llm_output: str, num_actions: int) -> tuple:
+        """
+        Parse LLM output into (think_text, action_int).
+
+        Splits on the first <action>n</action> tag:
+        - think_text: everything before the tag (stripped)
+        - action_int: parsed integer, or None if invalid/missing
+        Falls back to integer extraction if no tag found.
+        """
+        import re
+        m = re.search(r"<action>(.*?)</action>", llm_output, re.IGNORECASE | re.DOTALL)
+        if m:
+            think_text = llm_output[:m.start()].strip()
+            action_str = m.group(1).strip()
+            try:
+                action_int = int(action_str)
+                if not (0 <= action_int < num_actions):
+                    action_int = None
+            except (ValueError, IndexError):
+                action_int = None
+            return think_text, action_int
+        # Fallback: no tag found — treat entire output as think, try to find an integer
+        matches = re.findall(r'\b\d+\b', llm_output)
+        for m_str in matches:
+            try:
+                a = int(m_str)
+                if 0 <= a < num_actions:
+                    return llm_output.strip(), a
+            except ValueError:
+                continue
+        return llm_output.strip(), None
 
 
 def format_memory_context(hypotheses: List[Dict[str, Any]], max_items: int = 10) -> str:

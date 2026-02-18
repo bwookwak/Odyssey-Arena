@@ -3,7 +3,7 @@ Memory systems for LLM agents.
 
 Memory Architecture:
 1. Reflector-Curator: Common process for all memories (generates text insights)
-   - Reflector: Extracts concrete insights from trajectory
+   - Reflector: Extracts concrete insights from trajectory (domain-specific prompts)
    - Curator: Decides what to add/merge/skip (with deduplication)
 
 2. Memory Types:
@@ -11,11 +11,16 @@ Memory Architecture:
    - TextMemory: Raw text list (general approach)
    - HypothesisMemory: Parses text into structured hypotheses with scores (user's method)
    - GatedHypothesisMemory: Only uses verified hypotheses
+
+Domain-specific logic (reflection prompts, oracle verification, hypothesis parsing)
+is delegated to a DomainAdapter (see experiments.domain).
 """
 
 from typing import List, Dict, Any, Optional
 import math
 import re
+
+from experiments.domain import DomainAdapter, get_domain_adapter
 
 
 class MemorySystem:
@@ -27,21 +32,35 @@ class MemorySystem:
     """
     
     def __init__(self, use_reflector: bool = False, llm_client=None, 
-                 reflection_frequency: int = 5):
+                 reflection_frequency: int = 5,
+                 max_text_memories: int = 20,
+                 curation_context_size: int = 10,
+                 min_insight_length: int = 10,
+                 domain: Optional[DomainAdapter] = None,
+                 **kwargs):
         """
         Args:
             use_reflector: Whether to use Reflector-Curator process
             llm_client: LLM client (required if use_reflector=True)
             reflection_frequency: Trigger reflection after N experiences
+            max_text_memories: Max number of text memories to keep
+            curation_context_size: Number of recent memories in curation prompt
+            min_insight_length: Min length of insight string to accept
+            domain: Environment-specific adapter for prompts and verification (default: light)
         """
         self.use_reflector = use_reflector
         self.llm_client = llm_client
         self.reflection_frequency = reflection_frequency
+        self.max_text_memories = max_text_memories
+        self.curation_context_size = curation_context_size
+        self.min_insight_length = min_insight_length
+        self.domain = domain if domain is not None else get_domain_adapter('light')
         
         # For Reflector-Curator
         self.raw_experiences = []
         self.text_memories = []  # Text-based memories from Reflector-Curator
         self.reflection_count = 0
+        self._recent_ops = []  # Per-step memory ops for dashboard (reflection, curation, verify)
         
         if use_reflector and llm_client is None:
             raise ValueError("Reflector-Curator requires llm_client")
@@ -56,6 +75,12 @@ class MemorySystem:
     def _update_direct(self, obs_before: str, action: int, obs_after: str, feedback: str):
         """Direct update without Reflector-Curator (to be overridden)."""
         pass
+    
+    def get_recent_ops(self) -> List[Dict[str, Any]]:
+        """Return and clear per-step memory ops (reflection, curation, verify) for dashboard."""
+        out = list(getattr(self, '_recent_ops', []))
+        self._recent_ops.clear()
+        return out
     
     def _update_with_reflector(self, obs_before: str, action: int, obs_after: str, feedback: str):
         """
@@ -97,7 +122,7 @@ class MemorySystem:
             temperature=0.7
         )
         
-        if not insight or len(insight.strip()) < 10:
+        if not insight or len(insight.strip()) < self.min_insight_length:
             return
         
         # Stage 2: Curation
@@ -111,6 +136,14 @@ class MemorySystem:
         # Parse curator decision
         action = self._parse_curator_action(curator_decision)
         
+        self._recent_ops.append({
+            'op': 'reflection_curation',
+            'insight': insight.strip()[:1500],
+            'curator_decision': curator_decision.strip()[:1000],
+            'action': action['type'],
+            'memory_added': action.get('memory', '')[:500] if action['type'] == 'ADD' else None,
+        })
+        
         if action['type'] == 'ADD':
             self.text_memories.append(action['memory'])
             self.reflection_count += 1
@@ -118,37 +151,30 @@ class MemorySystem:
             pass  # Don't add
         
         # Limit memory size
-        if len(self.text_memories) > 20:
-            self.text_memories = self.text_memories[-20:]
+        if len(self.text_memories) > self.max_text_memories:
+            self.text_memories = self.text_memories[-self.max_text_memories:]
     
     def _build_reflection_prompt(self) -> str:
-        """Build Reflector prompt with explicit format guidance."""
+        """Build Reflector prompt; domain-specific instructions from self.domain."""
         exp_lines = []
         for i, exp in enumerate(self.raw_experiences, 1):
             obs_change = f"{exp['obs_before']} -> {exp['obs_after']}"
             exp_lines.append(f"{i}. Action {exp['action']}: {obs_change}")
         
         experiences_text = "\n".join(exp_lines)
+        instructions = self.domain.reflection_instructions()
         
         return f"""You are the Reflector: extract concrete insights from trajectory.
 
 Recent experiences:
 {experiences_text}
 
-Analyze and distill concrete insights about which actions affect which bulbs.
-Use EXPLICIT format: "Toggling bulb X affects bulb Y" or "Action X flips bulb Y".
-
-Example good insights:
-- "Toggling bulb 0 affects bulb 1"
-- "Action 2 flips bulb 3 and bulb 4"
-- "Bulb 5 depends on bulbs 2 and 3"
-
-Provide 1-3 specific insights (one per line):"""
+{instructions}"""
     
     def _build_curation_prompt(self, insight: str) -> str:
         """Build Curator prompt with action-based decision."""
         existing_text = "\n".join([
-            f"{i+1}. {mem}" for i, mem in enumerate(self.text_memories[-10:])
+            f"{i+1}. {mem}" for i, mem in enumerate(self.text_memories[-self.curation_context_size:])
         ]) if self.text_memories else "(No existing memories)"
         
         return f"""You are the Curator: decide what to add to memory.
@@ -164,7 +190,7 @@ DECISION - Choose ONE action:
 2. "SKIP: duplicate" - if already covered in existing memories
 3. "SKIP: low quality" - if insight is too vague or not actionable
 
-Important: If adding, use format "Toggling bulb X affects bulb Y" for parsability.
+{self.domain.curation_format_hint()}
 
 Your decision:"""
     
@@ -185,7 +211,7 @@ Your decision:"""
             return {'type': 'SKIP'}
         
         # Default: try to add the whole text if it's meaningful
-        if len(decision.strip()) > 10 and 'SKIP' not in decision_upper:
+        if len(decision.strip()) > self.min_insight_length and 'SKIP' not in decision_upper:
             return {
                 'type': 'ADD',
                 'memory': decision.strip()
@@ -233,7 +259,11 @@ class TextMemory(MemorySystem):
     """
     
     def __init__(self, llm_client, reflection_frequency: int = 5, 
-                 max_context_items: int = 10):
+                 max_context_items: Optional[int] = None,
+                 max_text_memories: int = 20,
+                 curation_context_size: int = 10,
+                 min_insight_length: int = 10,
+                 **kwargs):
         """
         Args:
             llm_client: LLM client for Reflector-Curator
@@ -241,7 +271,11 @@ class TextMemory(MemorySystem):
             max_context_items: Maximum memories to include in context
         """
         super().__init__(use_reflector=True, llm_client=llm_client,
-                        reflection_frequency=reflection_frequency)
+                        reflection_frequency=reflection_frequency,
+                        max_text_memories=max_text_memories,
+                        curation_context_size=curation_context_size,
+                        min_insight_length=min_insight_length,
+                        **kwargs)
         self.max_context_items = max_context_items
     
     def get_context(self, current_obs: str, suppressed: bool = False) -> str:
@@ -249,8 +283,8 @@ class TextMemory(MemorySystem):
         if suppressed or not self.text_memories:
             return ""
         
-        # Get recent memories
-        recent = self.text_memories[-self.max_context_items:]
+        # Get recent memories (all if max_context_items is None)
+        recent = self.text_memories[-self.max_context_items:] if self.max_context_items is not None else self.text_memories
         return "\n".join([f"{i+1}. {mem}" for i, mem in enumerate(recent)])
     
     def get_stats(self) -> Dict[str, Any]:
@@ -275,17 +309,23 @@ class HypothesisMemory(MemorySystem):
     
     Hypothesis structure:
     {
-        'text': "Toggling bulb 0 affects bulb 1",
-        'support': 3,
-        'contradict': 1, 
-        'confidence': 0.73,
-        'source': 'llm'
+        'text': natural language hypothesis (format depends on domain),
+        'support': int, 'contradict': int, 'confidence': float, 'source': str
     }
     """
     
     def __init__(self, llm_client, reflection_frequency: int = 5,
-                 max_context_items: int = 10, obs_format: str = 'bitstring',
-                 verification_mode: str = 'oracle'):
+                 max_context_items: Optional[int] = None, obs_format: str = 'bitstring',
+                 verification_mode: str = 'oracle',
+                 initial_confidence: float = 0.73,
+                 support_weight: float = 1.0,
+                 contradict_weight: float = 2.0,
+                 partial_match_support_delta: float = 0.5,
+                 max_text_memories: int = 20,
+                 curation_context_size: int = 10,
+                 min_insight_length: int = 10,
+                 domain: Optional[DomainAdapter] = None,
+                 **kwargs):
         """
         Args:
             llm_client: LLM client for Reflector-Curator
@@ -293,15 +333,42 @@ class HypothesisMemory(MemorySystem):
             max_context_items: Maximum hypotheses to include in context
             obs_format: Observation format ('bitstring' or 'emoji')
             verification_mode: How to verify hypotheses ('oracle', 'llm', 'hybrid', 'none')
+            initial_confidence: Initial confidence for new LLM hypotheses
+            support_weight: Weight for support in confidence formula
+            contradict_weight: Weight for contradict in confidence formula
+            partial_match_support_delta: Support delta for partial observation match
         """
         super().__init__(use_reflector=True, llm_client=llm_client,
-                        reflection_frequency=reflection_frequency)
+                        reflection_frequency=reflection_frequency,
+                        max_text_memories=max_text_memories,
+                        curation_context_size=curation_context_size,
+                        min_insight_length=min_insight_length,
+                        domain=domain,
+                        **kwargs)
         self.max_context_items = max_context_items
         self.obs_format = obs_format
         self.verification_mode = verification_mode
+        self.initial_confidence = initial_confidence
+        self.support_weight = float(support_weight)
+        self.contradict_weight = float(contradict_weight)
+        self.partial_match_support_delta = partial_match_support_delta
         
         # Store hypotheses as list of dicts (natural language based)
         self.hypotheses = []
+    
+    def add_hypothesis(self, hypothesis: Dict[str, Any]) -> None:
+        """
+        Add a hypothesis (e.g. from injection). Use this instead of mutating .hypotheses directly.
+        hypothesis: dict with keys text, support, contradict, confidence, source, (optional created_at)
+        """
+        self.hypotheses.append({
+            'text': hypothesis['text'],
+            'support': hypothesis.get('support', 1),
+            'contradict': hypothesis.get('contradict', 0),
+            'confidence': hypothesis.get('confidence', self.initial_confidence),
+            'source': hypothesis.get('source', 'injection'),
+            'created_at': hypothesis.get('created_at', len(self.hypotheses))
+        })
     
     def _update_with_reflector(self, obs_before: str, action: int, obs_after: str, feedback: str):
         """
@@ -327,54 +394,68 @@ class HypothesisMemory(MemorySystem):
         # Note: Oracle verification (ground truth) is called externally from run.py
         # because it needs custom_logic from environment
     
-    def verify_with_oracle(self, custom_logic: Dict[str, str]):
+    def verify_with_oracle(self, ground_truth: Any, use_llm: bool = True):
         """
-        Verify hypotheses against ground truth rules (custom_logic).
-        
-        This is TRUE oracle verification - uses actual latent rules from environment.
-        
-        Example:
-            Hypothesis: "Toggling bulb 0 affects bulb 1"
-            custom_logic: {"B1": "B0"} → B1 depends on B0
-            → CONFIRMED (support++)
-            
-            Hypothesis: "Toggling bulb 0 affects bulb 2"  
-            custom_logic: {"B2": "not B3"} → B2 doesn't depend on B0
-            → CONTRADICTED (contradict++)
-        
-        Args:
-            custom_logic: Ground truth rules like {"B0": "True", "B1": "B0", ...}
+        Verify hypotheses against environment ground truth (e.g. custom_logic for light).
+        Uses domain adapter for prompt/parse/verify. use_llm: use LLM when True, else domain's simple verify.
+        """
+        if use_llm and self.llm_client:
+            self._verify_with_oracle_llm(ground_truth)
+        else:
+            self._verify_with_oracle_simple(ground_truth)
+    
+    def _verify_with_oracle_llm(self, ground_truth: Any):
+        """
+        LLM-based oracle verification.
+        Uses domain adapter to build env-specific verification prompt.
         """
         for hyp in self.hypotheses:
-            # Extract predicted dependency from hypothesis text
-            dependency = self._extract_dependency_from_text(hyp['text'])
-            
+            verify_prompt = self.domain.build_oracle_verification_prompt(hyp['text'], ground_truth)
+            if not verify_prompt:
+                continue
+            try:
+                response = self.llm_client.generate(verify_prompt, max_tokens=20, temperature=0.0)
+                response_upper = response.upper().strip()
+                if 'CONFIRM' in response_upper:
+                    hyp['support'] += 1
+                    if hyp.get('source') != 'injection':
+                        hyp['source'] = 'oracle_verified'
+                elif 'CONTRADICT' in response_upper:
+                    hyp['contradict'] += 1
+                self._update_confidence(hyp)
+                self._recent_ops.append({
+                    'op': 'oracle_verify',
+                    'mode': 'llm',
+                    'hypothesis': hyp.get('text', '')[:200],
+                    'response': response.strip()[:100],
+                })
+            except Exception as e:
+                print(f"Warning: Oracle LLM verification failed: {e}")
+    
+    def _verify_with_oracle_simple(self, ground_truth: Any):
+        """
+        Non-LLM oracle verification using domain adapter (parse + verify).
+        """
+        for hyp in self.hypotheses:
+            dependency = self.domain.parse_dependency(hyp['text'])
             if dependency is None:
-                continue  # Can't parse hypothesis
-            
-            action_bulb, affected_bulb = dependency
-            
-            # Get the rule for affected_bulb
-            affected_rule = custom_logic.get(f"B{affected_bulb}", "")
-            
-            if not affected_rule:
-                continue  # No rule found
-            
-            # Check if action_bulb appears in the rule
-            # This indicates a dependency (direct or indirect)
-            action_bulb_name = f"B{action_bulb}"
-            
-            if action_bulb_name in affected_rule:
-                # Oracle confirms: dependency exists
+                continue
+            result = self.domain.verify_dependency_against_ground_truth(dependency, ground_truth)
+            if result is None:
+                continue
+            if result:
                 hyp['support'] += 1
-                if hyp.get('source') != 'injection':  # Don't overwrite injection source
+                if hyp.get('source') != 'injection':
                     hyp['source'] = 'oracle_verified'
             else:
-                # Oracle contradicts: no dependency in ground truth
                 hyp['contradict'] += 1
-            
-            # Update confidence
             self._update_confidence(hyp)
+            self._recent_ops.append({
+                'op': 'oracle_verify',
+                'mode': 'simple',
+                'hypothesis': hyp.get('text', '')[:200],
+                'result': result,
+            })
     
     def _reflect_and_curate(self):
         """
@@ -408,7 +489,7 @@ class HypothesisMemory(MemorySystem):
                     'text': memory_text,
                     'support': 1,           # LLM mentioned it
                     'contradict': 0,        # No contradictions yet
-                    'confidence': 0.73,     # Initial from LLM
+                    'confidence': self.initial_confidence,
                     'source': 'llm',
                     'created_at': len(self.hypotheses)
                 })
@@ -418,64 +499,21 @@ class HypothesisMemory(MemorySystem):
     
     def _verify_with_observation(self, obs_before: str, action: int, obs_after: str):
         """
-        Verify hypotheses against observed transition (NOT oracle - empirical).
-        
-        Observation-based verification:
-        - Extract expected effects from hypothesis text
-        - Check if observed transition matches
-        - Update support/contradict accordingly
-        
-        Note: This is empirical, not oracle. Can be noisy.
+        Verify hypotheses against observed transition (empirical, not oracle).
+        Uses domain adapter for parsing predicted effects and getting actual effects.
         """
-        obs1_list = self._obs_to_list(obs_before)
-        obs2_list = self._obs_to_list(obs_after)
-        
-        # Detect actual changes
-        actual_flips = set()
-        for i, (b1, b2) in enumerate(zip(obs1_list, obs2_list)):
-            if b1 != b2:
-                actual_flips.add(i)
-        
-        # Verify each hypothesis
+        actual_effects = self.domain.get_actual_effects(obs_before, obs_after, self.obs_format)
         for hyp in self.hypotheses:
-            # Extract predicted effects from hypothesis text
-            predicted_effects = self._extract_effects_from_text(hyp['text'], action)
-            
+            predicted_effects = self.domain.parse_effects_from_text(hyp['text'], action)
             if predicted_effects is None:
-                continue  # Not about this action
-            
-            # Check if prediction matches reality
-            if predicted_effects == actual_flips:
-                hyp['support'] += 1  # Confirmed!
-            elif len(predicted_effects & actual_flips) > 0:
-                hyp['support'] += 0.5  # Partial match
+                continue
+            if predicted_effects == actual_effects:
+                hyp['support'] += 1
+            elif len(predicted_effects & actual_effects) > 0:
+                hyp['support'] += self.partial_match_support_delta
             else:
-                hyp['contradict'] += 1  # Contradicted!
-            
-            # Recalculate confidence
+                hyp['contradict'] += 1
             self._update_confidence(hyp)
-    
-    def _extract_dependency_from_text(self, hypothesis_text: str) -> Optional[tuple]:
-        """
-        Extract dependency from hypothesis text for oracle verification.
-        
-        "Toggling bulb 0 affects bulb 1" → (0, 1)
-        "Action 2 flips bulb 3" → (2, 3)
-        
-        Returns:
-            (action_bulb, affected_bulb) or None
-        """
-        patterns = [
-            r'(?:toggling|action)\s+(?:bulb\s+)?(\d+)\s+(?:affects?|flips?|influences?)\s+(?:bulb\s+)?(\d+)',
-            r'bulb\s+(\d+)\s+(?:affects?|flips?)\s+bulb\s+(\d+)',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, hypothesis_text, re.IGNORECASE)
-            if match:
-                return (int(match.group(1)), int(match.group(2)))
-        
-        return None
     
     def _verify_with_llm(self):
         """
@@ -525,48 +563,11 @@ Your answer (one word):"""
             except Exception as e:
                 print(f"Warning: LLM verification failed: {e}")
     
-    def _extract_effects_from_text(self, hypothesis_text: str, action: int) -> Optional[set]:
-        """
-        Extract predicted effects from hypothesis text.
-        
-        Args:
-            hypothesis_text: "Toggling bulb 0 affects bulb 1 and bulb 2"
-            action: Current action taken
-            
-        Returns:
-            Set of bulb indices expected to flip, or None if not about this action
-        """
-        # Check if hypothesis mentions this action
-        action_patterns = [
-            rf'\b(?:action|bulb|toggling)\s+{action}\b',
-            rf'\b{action}\s+(?:affects?|flips?)',
-        ]
-        
-        mentions_action = any(re.search(p, hypothesis_text, re.IGNORECASE) 
-                             for p in action_patterns)
-        
-        if not mentions_action:
-            return None
-        
-        # Extract affected bulb indices
-        affected = set()
-        effect_patterns = [
-            r'(?:affects?|flips?|influences?|toggles?)\s+bulb\s+(\d+)',
-            r'(?:affects?|flips?|influences?)\s+(\d+)',
-        ]
-        
-        for pattern in effect_patterns:
-            matches = re.findall(pattern, hypothesis_text, re.IGNORECASE)
-            for match in matches:
-                affected.add(int(match))
-        
-        return affected if affected else None
-    
     def _update_confidence(self, hypothesis: Dict):
-        """Recalculate confidence based on support/contradict."""
+        """Recalculate confidence based on support/contradict (configurable weights)."""
         support = hypothesis['support']
         contradict = hypothesis['contradict']
-        score = support - 2 * contradict
+        score = self.support_weight * support - self.contradict_weight * contradict
         hypothesis['confidence'] = 1.0 / (1.0 + math.exp(-score))
     
     def _obs_to_list(self, obs: str) -> List[bool]:
@@ -594,8 +595,9 @@ Your answer (one word):"""
             reverse=True
         )
         
+        hyps_to_show = sorted_hyps[:self.max_context_items] if self.max_context_items is not None else sorted_hyps
         lines = []
-        for i, hyp in enumerate(sorted_hyps[:self.max_context_items], 1):
+        for i, hyp in enumerate(hyps_to_show, 1):
             conf = hyp.get('confidence', 0.0)
             supp = hyp.get('support', 0)
             cont = hyp.get('contradict', 0)
@@ -623,28 +625,32 @@ class GatedHypothesisMemory(HypothesisMemory):
     """
     Gated hypothesis memory - verification-lite version.
     
-    Same as HypothesisMemory but only includes verified hypotheses in context:
-    - contradict == 0 (no contradictions observed)
-    - confidence >= 0.75
-    - support >= 2 (or >= 1 for LLM-sourced)
+    Same as HypothesisMemory but only includes verified hypotheses in context.
+    Thresholds are configurable (min_confidence, min_support, max_contradictions;
+    for LLM-sourced: min_confidence_llm, min_support_llm).
     """
     
     def __init__(
         self,
         llm_client,
         reflection_frequency: int = 5,
-        max_context_items: int = 10,
+        max_context_items: Optional[int] = None,
         obs_format: str = 'bitstring',
         verification_mode: str = 'oracle',
         min_confidence: float = 0.75,
         min_support: int = 2,
-        max_contradictions: int = 0
+        max_contradictions: int = 0,
+        min_confidence_llm: float = 0.70,
+        min_support_llm: int = 1,
+        **kwargs
     ):
         super().__init__(llm_client, reflection_frequency, max_context_items, 
-                        obs_format, verification_mode)
+                        obs_format, verification_mode, **kwargs)
         self.min_confidence = min_confidence
         self.min_support = min_support
         self.max_contradictions = max_contradictions
+        self.min_confidence_llm = min_confidence_llm
+        self.min_support_llm = min_support_llm
     
     def get_context(self, current_obs: str, suppressed: bool = False) -> str:
         """
@@ -672,10 +678,10 @@ class GatedHypothesisMemory(HypothesisMemory):
             
             # Source-aware verification
             if source == 'llm':
-                # LLM-generated: more lenient
+                # LLM-generated: more lenient (configurable)
                 if (contradict <= self.max_contradictions and
-                    confidence >= 0.70 and
-                    support >= 1):
+                    confidence >= self.min_confidence_llm and
+                    support >= self.min_support_llm):
                     verified_hyps.append(hyp)
             else:
                 # Observation-based: stricter
@@ -690,8 +696,9 @@ class GatedHypothesisMemory(HypothesisMemory):
         # Sort by confidence (descending)
         verified_hyps.sort(key=lambda x: x.get('confidence', 0.0), reverse=True)
         
+        to_show = verified_hyps[:self.max_context_items] if self.max_context_items is not None else verified_hyps
         lines = []
-        for i, hyp in enumerate(verified_hyps[:self.max_context_items], 1):
+        for i, hyp in enumerate(to_show, 1):
             conf = hyp.get('confidence', 0.0)
             supp = hyp.get('support', 0)
             cont = hyp.get('contradict', 0)
@@ -719,7 +726,24 @@ class GatedHypothesisMemory(HypothesisMemory):
 
 
 def create_memory_system(memory_type: str, llm_client=None, obs_format='bitstring', 
-                        verification_mode='oracle', **kwargs) -> MemorySystem:
+                        verification_mode='oracle',
+                        reflection_frequency=1,
+                        max_text_memories=20,
+                        curation_context_size=10,
+                        min_insight_length=10,
+                        max_context_items=None,
+                        initial_confidence=0.73,
+                        confidence_support_weight=1.0,
+                        confidence_contradict_weight=2.0,
+                        partial_match_support_delta=0.5,
+                        min_confidence=0.75,
+                        min_support=2,
+                        max_contradictions=0,
+                        min_confidence_llm=0.70,
+                        min_support_llm=1,
+                        domain=None,
+                        env_type='light',
+                        **kwargs) -> MemorySystem:
     """
     Factory function to create memory system.
     
@@ -729,42 +753,76 @@ def create_memory_system(memory_type: str, llm_client=None, obs_format='bitstrin
     - 'hypothesis': Hypothesis memory with verification (Reflector-Curator → natural language hypotheses)
     - 'gated': Gated hypothesis memory (hypothesis + quality filter)
     
-    Args:
-        memory_type: Type of memory
-        llm_client: LLM client (required for text/hypothesis/gated)
-        obs_format: Observation format ('bitstring' or 'emoji')
-        verification_mode: How to verify hypotheses ('oracle', 'llm', 'hybrid', 'none')
-        **kwargs: Additional arguments for memory system
-        
-    Returns:
-        Memory system instance
+    All numeric thresholds and sizes are configurable via explicit args or kwargs.
+    domain: optional DomainAdapter; if None, get_domain_adapter(env_type) is used.
     """
+    if domain is None:
+        domain = get_domain_adapter(env_type)
+    mem_kw = {
+        'reflection_frequency': reflection_frequency,
+        'max_text_memories': max_text_memories,
+        'curation_context_size': curation_context_size,
+        'min_insight_length': min_insight_length,
+        'max_context_items': max_context_items,
+        'domain': domain,
+        **kwargs
+    }
+    # Avoid passing hypothesis-specific args twice (explicit params above; also aliases from callers)
+    for key in ('initial_confidence', 'confidence_support_weight', 'confidence_contradict_weight',
+                'partial_match_support_delta', 'min_confidence', 'min_support', 'max_contradictions',
+                'min_confidence_llm', 'min_support_llm', 'support_weight', 'contradict_weight'):
+        mem_kw.pop(key, None)
     if memory_type == 'nomem':
         return NoMemory()
     elif memory_type == 'text':
         if llm_client is None:
             raise ValueError("TextMemory requires llm_client parameter")
-        return TextMemory(llm_client=llm_client, **kwargs)
+        return TextMemory(llm_client=llm_client, **mem_kw)
     elif memory_type == 'hypothesis':
         if llm_client is None:
             raise ValueError("HypothesisMemory requires llm_client parameter")
-        return HypothesisMemory(llm_client=llm_client, obs_format=obs_format, 
-                               verification_mode=verification_mode, **kwargs)
+        return HypothesisMemory(
+            llm_client=llm_client, obs_format=obs_format, 
+            verification_mode=verification_mode,
+            initial_confidence=initial_confidence,
+            support_weight=confidence_support_weight,
+            contradict_weight=confidence_contradict_weight,
+            partial_match_support_delta=partial_match_support_delta,
+            **mem_kw
+        )
     elif memory_type == 'gated':
         if llm_client is None:
             raise ValueError("GatedHypothesisMemory requires llm_client parameter")
-        return GatedHypothesisMemory(llm_client=llm_client, obs_format=obs_format,
-                                    verification_mode=verification_mode, **kwargs)
+        return GatedHypothesisMemory(
+            llm_client=llm_client, obs_format=obs_format,
+            verification_mode=verification_mode,
+            min_confidence=min_confidence,
+            min_support=min_support,
+            max_contradictions=max_contradictions,
+            min_confidence_llm=min_confidence_llm,
+            min_support_llm=min_support_llm,
+            initial_confidence=initial_confidence,
+            support_weight=confidence_support_weight,
+            contradict_weight=confidence_contradict_weight,
+            partial_match_support_delta=partial_match_support_delta,
+            **mem_kw
+        )
     # Backward compatibility aliases
     elif memory_type == 'naive':
         if llm_client is None:
             raise ValueError("HypothesisMemory (naive) requires llm_client parameter")
-        return HypothesisMemory(llm_client=llm_client, obs_format=obs_format,
-                               verification_mode=verification_mode, **kwargs)
+        return HypothesisMemory(
+            llm_client=llm_client, obs_format=obs_format,
+            verification_mode=verification_mode,
+            initial_confidence=initial_confidence,
+            support_weight=confidence_support_weight,
+            contradict_weight=confidence_contradict_weight,
+            partial_match_support_delta=partial_match_support_delta,
+            **mem_kw
+        )
     elif memory_type == 'reflector':
-        # Alias for 'text' memory
         if llm_client is None:
             raise ValueError("TextMemory (reflector) requires llm_client parameter")
-        return TextMemory(llm_client=llm_client, **kwargs)
+        return TextMemory(llm_client=llm_client, **mem_kw)
     else:
         raise ValueError(f"Unknown memory type: {memory_type}")

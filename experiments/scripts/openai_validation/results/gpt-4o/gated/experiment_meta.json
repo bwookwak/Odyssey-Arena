@@ -1,0 +1,18 @@
+{
+  "experiment_id": "exp_20260218_183827_119946",
+  "name": "gpt-4o-gated",
+  "status": "failed",
+  "started_at": "2026-02-18T18:38:27.119975Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4o",
+    "memory": "gated",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 3,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-18T19:24:16.595273Z"
+}

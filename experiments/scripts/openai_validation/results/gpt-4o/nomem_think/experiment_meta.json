@@ -1,0 +1,18 @@
+{
+  "experiment_id": "exp_20260218_183827_070519",
+  "name": "gpt-4o-nomem_think",
+  "status": "failed",
+  "started_at": "2026-02-18T18:38:27.070556Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4o",
+    "memory": "nomem",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 3,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-18T19:24:16.595757Z"
+}
