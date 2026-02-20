@@ -1,0 +1,28 @@
+{
+  "experiment_id": "exp_20260219_072602_681458",
+  "name": "gpt-4.1-mini-naive",
+  "status": "completed",
+  "started_at": "2026-02-19T07:26:02.681489Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4.1-mini",
+    "memory": "naive",
+    "verification_mode": "none",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-19T08:05:26.015617Z",
+  "summary": {
+    "num_episodes": 30,
+    "num_success": 0,
+    "success_rate": 0.0,
+    "avg_steps_all": 27.033333333333335,
+    "avg_steps_success": 0.0,
+    "avg_loop_ratio": 0.4999690885447757,
+    "avg_memory_usage_rate": 0.9528090508210318,
+    "avg_invalid_action_rate": 0.0
+  }
+}

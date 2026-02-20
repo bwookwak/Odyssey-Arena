@@ -14,6 +14,24 @@ app = Flask(__name__, template_folder=str(Path(__file__).parent / "templates"))
 app.config["JSON_AS_ASCII"] = False
 
 
+_DASHBOARD_STR_TRUNCATE = 400  # max chars for long text fields in dashboard display
+
+@app.template_filter('truncate_ops')
+def truncate_ops_filter(ops, max_chars: int = _DASHBOARD_STR_TRUNCATE):
+    """Truncate long string fields inside a memory_ops list for dashboard display only."""
+    import copy, json as _json
+    _LONG_FIELDS = {'reasoning', 'error_identification', 'hypothesis', 'response',
+                    'correct_approach', 'root_cause_analysis'}
+    result = []
+    for op in (ops or []):
+        op2 = dict(op)
+        for k in _LONG_FIELDS:
+            if isinstance(op2.get(k), str) and len(op2[k]) > max_chars:
+                op2[k] = op2[k][:max_chars] + ' …(truncated)'
+        result.append(op2)
+    return _json.dumps(result, ensure_ascii=False, indent=2)
+
+
 @app.context_processor
 def inject_sort_url():
     """Build index URL with current filter params and given sort."""
@@ -142,14 +160,46 @@ def experiment_detail(experiment_id):
     if not entry:
         abort(404)
     output_dir = entry["output_dir"]
+    out_path = Path(output_dir)
+
     log_content = _read_log_tail(output_dir)
-    config = _read_json_safe(Path(output_dir) / "config.json")
-    summary = _read_json_safe(Path(output_dir) / "summary.json")
+    config = _read_json_safe(out_path / "config.json")
+    summary = _read_json_safe(out_path / "summary.json")
     if not summary and entry.get("summary"):
         summary = entry["summary"]
-    episodes = _read_json_safe(Path(output_dir) / "episodes.json")
-    if not isinstance(episodes, list):
-        episodes = []
+    progress = _read_json_safe(out_path / "progress.json")
+
+    mode = config.get("mode", "infer")
+
+    # Pipeline mode: load per-stage episodes/summary separately
+    explore_episodes: list = []
+    infer_episodes: list = []
+    explore_summary: dict = {}
+    infer_summary: dict = {}
+    has_memory_snapshot = False
+
+    if mode == "pipeline":
+        ep = _read_json_safe(out_path / "explore" / "episodes.json")
+        explore_episodes = ep if isinstance(ep, list) else []
+        ip = _read_json_safe(out_path / "infer" / "episodes.json")
+        infer_episodes = ip if isinstance(ip, list) else []
+        explore_summary = _read_json_safe(out_path / "explore" / "summary.json")
+        infer_summary = _read_json_safe(out_path / "infer" / "summary.json")
+        has_memory_snapshot = (out_path / "explore" / "memory.json").exists()
+        # Use infer summary as the main summary shown at top
+        if not summary and infer_summary:
+            summary = infer_summary
+        episodes = infer_episodes  # fallback for non-pipeline template path
+    elif mode == "explore":
+        episodes = _read_json_safe(out_path / "episodes.json")
+        if not isinstance(episodes, list):
+            episodes = []
+        explore_episodes = episodes
+    else:
+        episodes = _read_json_safe(out_path / "episodes.json")
+        if not isinstance(episodes, list):
+            episodes = []
+
     return render_template(
         "detail.html",
         entry=entry,
@@ -157,6 +207,14 @@ def experiment_detail(experiment_id):
         config_str=_format_json(config),
         summary_str=_format_json(summary),
         episodes=episodes,
+        mode=mode,
+        progress=progress,
+        # pipeline-specific
+        explore_episodes=explore_episodes,
+        infer_episodes=infer_episodes,
+        explore_summary_str=_format_json(explore_summary),
+        infer_summary_str=_format_json(infer_summary),
+        has_memory_snapshot=has_memory_snapshot,
     )
 
 

@@ -1,0 +1,30 @@
+{
+  "experiment_id": "exp_20260219_112157_216504",
+  "name": "gpt-5-nomem_nothink",
+  "status": "completed",
+  "started_at": "2026-02-19T11:21:57.216541Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-5",
+    "memory": "nomem",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-19T14:06:07.791361Z",
+  "summary": {
+    "num_episodes": 30,
+    "num_success": 3,
+    "success_rate": 0.1,
+    "avg_steps_all": 144.66666666666666,
+    "avg_steps_success": 79.0,
+    "avg_loop_ratio": 0.22524828603566738,
+    "avg_memory_usage_rate": 0.0,
+    "avg_invalid_action_rate": 0.9787207131677859,
+    "avg_max_progress": 6.4333,
+    "avg_avg_progress": 3.4882
+  }
+}

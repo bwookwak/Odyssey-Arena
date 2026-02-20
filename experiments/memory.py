@@ -17,6 +17,7 @@ is delegated to a DomainAdapter (see experiments.domain).
 """
 
 from typing import List, Dict, Any, Optional
+import json
 import math
 import re
 
@@ -31,12 +32,14 @@ class MemorySystem:
     to generate text-based memories from experiences.
     """
     
-    def __init__(self, use_reflector: bool = False, llm_client=None, 
+    def __init__(self, use_reflector: bool = False, llm_client=None,
                  reflection_frequency: int = 5,
                  max_text_memories: int = 20,
                  curation_context_size: int = 10,
                  min_insight_length: int = 10,
                  domain: Optional[DomainAdapter] = None,
+                 mid_episode_reflection: bool = True,
+                 episode_reflection: bool = True,
                  **kwargs):
         """
         Args:
@@ -47,6 +50,9 @@ class MemorySystem:
             curation_context_size: Number of recent memories in curation prompt
             min_insight_length: Min length of insight string to accept
             domain: Environment-specific adapter for prompts and verification (default: light)
+            mid_episode_reflection: If False, skip the k-step Reflector-Curator even when
+                                    reflection_frequency threshold is reached. Default: True.
+            episode_reflection: If False, reflect_on_episode() is a no-op. Default: True.
         """
         self.use_reflector = use_reflector
         self.llm_client = llm_client
@@ -55,6 +61,8 @@ class MemorySystem:
         self.curation_context_size = curation_context_size
         self.min_insight_length = min_insight_length
         self.domain = domain if domain is not None else get_domain_adapter('light')
+        self.mid_episode_reflection = mid_episode_reflection
+        self.episode_reflection = episode_reflection
         
         # For Reflector-Curator
         self.raw_experiences = []
@@ -65,28 +73,41 @@ class MemorySystem:
         if use_reflector and llm_client is None:
             raise ValueError("Reflector-Curator requires llm_client")
     
-    def update(self, obs_before: str, action: int, obs_after: str, feedback: str):
-        """Update memory based on transition."""
+    def update(self, obs_before: str, action: int, obs_after: str, feedback: str,
+               think: str = ""):
+        """
+        Update memory based on a single transition.
+
+        Args:
+            obs_before: Observation before action.
+            action: Action taken.
+            obs_after: Observation after action.
+            feedback: Environment feedback string.
+            think: Model's reasoning / think text for this step (optional).
+                   Stored in raw_experiences and used by the mid-episode reflector.
+        """
         if self.use_reflector:
-            self._update_with_reflector(obs_before, action, obs_after, feedback)
+            self._update_with_reflector(obs_before, action, obs_after, feedback, think=think)
         else:
-            self._update_direct(obs_before, action, obs_after, feedback)
-    
-    def _update_direct(self, obs_before: str, action: int, obs_after: str, feedback: str):
+            self._update_direct(obs_before, action, obs_after, feedback, think=think)
+
+    def _update_direct(self, obs_before: str, action: int, obs_after: str, feedback: str,
+                       think: str = ""):
         """Direct update without Reflector-Curator (to be overridden)."""
         pass
-    
+
     def get_recent_ops(self) -> List[Dict[str, Any]]:
         """Return and clear per-step memory ops (reflection, curation, verify) for dashboard."""
         out = list(getattr(self, '_recent_ops', []))
         self._recent_ops.clear()
         return out
-    
-    def _update_with_reflector(self, obs_before: str, action: int, obs_after: str, feedback: str):
+
+    def _update_with_reflector(self, obs_before: str, action: int, obs_after: str,
+                                feedback: str, think: str = ""):
         """
         Update using Reflector-Curator process.
-        
-        1. Accumulate experiences
+
+        1. Accumulate experiences (including think text for mid-episode reflector)
         2. When threshold reached: Reflect → Curate → Add to text_memories
         3. Process text_memories (subclass-specific)
         """
@@ -95,81 +116,142 @@ class MemorySystem:
             'obs_before': obs_before,
             'action': action,
             'obs_after': obs_after,
-            'feedback': feedback
+            'feedback': feedback,
+            'think': think,
         })
-        
-        # Trigger reflection when threshold reached
+
+        # Trigger mid-episode reflection when threshold reached (if enabled)
         if len(self.raw_experiences) >= self.reflection_frequency:
-            try:
-                self._reflect_and_curate()
-            except Exception as e:
-                print(f"Warning: Reflection failed: {e}")
-            finally:
-                self.raw_experiences = []
+            if self.mid_episode_reflection:
+                try:
+                    self._reflect_and_curate()
+                except Exception as e:
+                    print(f"Warning: Mid-episode reflection failed: {e}")
+            self.raw_experiences = []
     
     def _reflect_and_curate(self):
         """
-        Execute Reflector-Curator pipeline.
-        
-        Stage 1 (Reflector): Extract concrete insights from experiences
-        Stage 2 (Curator): Decide what to add/skip (deduplication)
+        Execute Reflector-Curator pipeline (mid-episode, called every k steps).
+
+        Stage 1 (Reflector): Calls domain.build_midep_reflection_prompt() → JSON output.
+                              Extracts key_insight from the JSON.
+        Stage 2 (Curator):   Deduplication; decides ADD or SKIP.
         """
-        # Stage 1: Reflection
+        # Stage 1: Reflection — domain builds full JSON-format prompt
         reflection_prompt = self._build_reflection_prompt()
-        insight = self.llm_client.generate(
+        raw_response = self.llm_client.generate(
             reflection_prompt,
-            max_tokens=200,
-            temperature=0.7
+            max_tokens=500,
+            temperature=0.4,
         )
-        
+
+        # Parse JSON and extract key_insight
+        insight = self._extract_key_insight(raw_response)
+
         if not insight or len(insight.strip()) < self.min_insight_length:
             return
-        
-        # Stage 2: Curation
+
+        # Stage 2: Curation (deduplication)
         curation_prompt = self._build_curation_prompt(insight)
         curator_decision = self.llm_client.generate(
             curation_prompt,
             max_tokens=200,
-            temperature=0.5
+            temperature=0.5,
         )
-        
-        # Parse curator decision
+
         action = self._parse_curator_action(curator_decision)
-        
+
         self._recent_ops.append({
             'op': 'reflection_curation',
-            'insight': insight.strip()[:1500],
+            'insight': insight[:1500],
             'curator_decision': curator_decision.strip()[:1000],
             'action': action['type'],
             'memory_added': action.get('memory', '')[:500] if action['type'] == 'ADD' else None,
         })
-        
+
         if action['type'] == 'ADD':
             self.text_memories.append(action['memory'])
             self.reflection_count += 1
-        elif action['type'] == 'SKIP':
-            pass  # Don't add
-        
+
         # Limit memory size
         if len(self.text_memories) > self.max_text_memories:
             self.text_memories = self.text_memories[-self.max_text_memories:]
-    
+
     def _build_reflection_prompt(self) -> str:
-        """Build Reflector prompt; domain-specific instructions from self.domain."""
-        exp_lines = []
-        for i, exp in enumerate(self.raw_experiences, 1):
-            obs_change = f"{exp['obs_before']} -> {exp['obs_after']}"
-            exp_lines.append(f"{i}. Action {exp['action']}: {obs_change}")
-        
-        experiences_text = "\n".join(exp_lines)
-        instructions = self.domain.reflection_instructions()
-        
-        return f"""You are the Reflector: extract concrete insights from trajectory.
+        """
+        Build the mid-episode reflector prompt via the domain adapter.
+        domain.build_midep_reflection_prompt() returns the full JSON-format prompt.
+        """
+        return self.domain.build_midep_reflection_prompt(self.raw_experiences)
 
-Recent experiences:
-{experiences_text}
+    def _extract_key_insight(self, raw_response: str) -> str:
+        """
+        Parse JSON output from the mid-episode reflector, extract key_insight field.
+        Falls back to raw text if JSON parsing fails (backward-compat).
+        """
+        text = raw_response.strip()
+        # Direct JSON parse
+        try:
+            data = json.loads(text)
+            ki = data.get('key_insight', '')
+            if ki and isinstance(ki, str):
+                return ki.strip()
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # JSON block extraction
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group())
+                ki = data.get('key_insight', '')
+                if ki and isinstance(ki, str):
+                    return ki.strip()
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # Fallback: return raw text as-is
+        return text
 
-{instructions}"""
+    def _parse_episode_reflection(self, raw_response: str) -> Dict[str, Any]:
+        """
+        Parse JSON output from the post-episode reflector.
+        Normalises key_insight (singular) → key_insights (list) for uniform handling.
+        Returns {} on failure.
+        """
+        text = raw_response.strip()
+        for candidate in [text, None]:
+            if candidate is None:
+                m = re.search(r'\{.*\}', text, re.DOTALL)
+                if not m:
+                    break
+                candidate = m.group()
+            try:
+                data = json.loads(candidate)
+                # Normalise: singular key_insight → list
+                if 'key_insight' in data and 'key_insights' not in data:
+                    ki = data['key_insight']
+                    data['key_insights'] = [ki] if isinstance(ki, str) else list(ki)
+                if 'key_insights' not in data:
+                    data['key_insights'] = []
+                return data
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return {'key_insights': []}
+
+    def reflect_on_episode(
+        self,
+        trajectory: List[Dict[str, Any]],
+        task_context: str,
+        success: bool,
+    ) -> None:
+        """
+        Post-episode reflection hook (called once after episode ends).
+
+        Calls domain.build_episode_reflection_prompt() to build a full-trajectory
+        prompt and extracts multiple key_insights from the JSON response.
+        Subclasses (TextMemory, HypothesisMemory) override to store insights.
+        Base: no-op (NoMemory), or when episode_reflection=False.
+        """
+        pass  # subclasses check self.episode_reflection before doing work
     
     def _build_curation_prompt(self, insight: str) -> str:
         """Build Curator prompt with action-based decision."""
@@ -234,6 +316,18 @@ Your decision:"""
             'memory_size': 0
         }
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize memory state to a JSON-serializable dict (for pipeline stage handoff)."""
+        return {
+            'type': self.__class__.__name__,
+            'text_memories': list(getattr(self, 'text_memories', [])),
+        }
+
+    def load_from_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Restore memory state from a snapshot dict produced by to_dict()."""
+        if 'text_memories' in snapshot:
+            self.text_memories = list(snapshot['text_memories'])
+
 
 class NoMemory(MemorySystem):
     """No memory baseline - empty context."""
@@ -241,7 +335,8 @@ class NoMemory(MemorySystem):
     def __init__(self):
         super().__init__(use_reflector=False)
     
-    def _update_direct(self, obs_before: str, action: int, obs_after: str, feedback: str):
+    def _update_direct(self, obs_before: str, action: int, obs_after: str, feedback: str,
+                       think: str = ""):
         """No-op."""
         pass
     
@@ -294,6 +389,52 @@ class TextMemory(MemorySystem):
             'num_reflections': self.reflection_count,
             'memory_size': len(self.text_memories)
         }
+
+    def reflect_on_episode(
+        self,
+        trajectory: List[Dict[str, Any]],
+        task_context: str,
+        success: bool,
+    ) -> None:
+        """
+        Post-episode reflection: extract multiple insights from the full trajectory
+        and append each to text_memories.
+
+        Calls domain.build_episode_reflection_prompt() → LLM → JSON with key_insights[].
+        Skipped when episode_reflection=False or llm_client is unavailable.
+        """
+        if not self.episode_reflection or not self.llm_client:
+            return
+        outcome = "SUCCESS" if success else "FAILURE"
+        print(f"[EPISODE_REFLECT] Running post-episode reflection ({outcome}) ...")
+        prompt = self.domain.build_episode_reflection_prompt(trajectory, success, task_context)
+        try:
+            raw = self.llm_client.generate(prompt, max_tokens=800, temperature=0.4)
+            data = self._parse_episode_reflection(raw)
+        except Exception as e:
+            print(f"Warning: post-episode reflection failed: {e}")
+            return
+
+        added = 0
+        for insight_text in data.get('key_insights', []):
+            if not isinstance(insight_text, str):
+                continue
+            insight_text = insight_text.strip()
+            if len(insight_text) >= self.min_insight_length:
+                self.text_memories.append(insight_text)
+                added += 1
+
+        if len(self.text_memories) > self.max_text_memories:
+            self.text_memories = self.text_memories[-self.max_text_memories:]
+
+        print(f"[EPISODE_REFLECT] Done — {added} insight(s) added. "
+              f"Total text_memories: {len(self.text_memories)}")
+        self._recent_ops.append({
+            'op': 'episode_reflection',
+            'success': success,
+            'insights_added': added,
+            'reasoning': data.get('reasoning', ''),
+        })
 
 
 class HypothesisMemory(MemorySystem):
@@ -370,16 +511,17 @@ class HypothesisMemory(MemorySystem):
             'created_at': hypothesis.get('created_at', len(self.hypotheses))
         })
     
-    def _update_with_reflector(self, obs_before: str, action: int, obs_after: str, feedback: str):
+    def _update_with_reflector(self, obs_before: str, action: int, obs_after: str,
+                                feedback: str, think: str = ""):
         """
         Hybrid update: Reflector-Curator + optional verification.
-        
+
         1. Accumulate experiences and trigger reflection
         2. Parse text into natural language hypotheses
         3. Optionally verify existing hypotheses
         """
         # Store experience for reflection
-        super()._update_with_reflector(obs_before, action, obs_after, feedback)
+        super()._update_with_reflector(obs_before, action, obs_after, feedback, think=think)
         
         # Observation-based verification (empirical)
         if self.verification_mode in ['observation', 'hybrid']:
@@ -394,6 +536,63 @@ class HypothesisMemory(MemorySystem):
         # Note: Oracle verification (ground truth) is called externally from run.py
         # because it needs custom_logic from environment
     
+    def reflect_on_episode(
+        self,
+        trajectory: List[Dict[str, Any]],
+        task_context: str,
+        success: bool,
+    ) -> None:
+        """
+        Post-episode reflection: extract multiple insights from the full trajectory
+        and add each as a new hypothesis (deduplication by text equality).
+
+        Calls domain.build_episode_reflection_prompt() → LLM → JSON with key_insights[].
+        Each unique insight is stored as a hypothesis with initial_confidence.
+        Skipped when episode_reflection=False or llm_client is unavailable.
+        """
+        if not self.episode_reflection or not self.llm_client:
+            return
+        outcome = "SUCCESS" if success else "FAILURE"
+        print(f"[EPISODE_REFLECT] Running post-episode hypothesis reflection ({outcome}) ...")
+        prompt = self.domain.build_episode_reflection_prompt(trajectory, success, task_context)
+        try:
+            raw = self.llm_client.generate(prompt, max_tokens=800, temperature=0.4)
+            data = self._parse_episode_reflection(raw)
+        except Exception as e:
+            print(f"Warning: post-episode hypothesis reflection failed: {e}")
+            return
+
+        added = 0
+        existing_texts = {h['text'].lower() for h in self.hypotheses}
+        for insight_text in data.get('key_insights', []):
+            if not isinstance(insight_text, str):
+                continue
+            insight_text = insight_text.strip()
+            if len(insight_text) < self.min_insight_length:
+                continue
+            if insight_text.lower() in existing_texts:
+                continue  # Skip duplicates
+            self.hypotheses.append({
+                'text': insight_text,
+                'support': 1,
+                'contradict': 0,
+                'confidence': self.initial_confidence,
+                'source': 'episode_reflection',
+                'created_at': len(self.hypotheses),
+            })
+            existing_texts.add(insight_text.lower())
+            added += 1
+
+        print(f"[EPISODE_REFLECT] Done — {added} hypothesis(es) added. "
+              f"Total hypotheses: {len(self.hypotheses)}")
+        self._recent_ops.append({
+            'op': 'episode_reflection',
+            'success': success,
+            'insights_added': added,
+            'reasoning': data.get('reasoning', ''),
+            'error_identification': data.get('error_identification', ''),
+        })
+
     def verify_with_oracle(self, ground_truth: Any, use_llm: bool = True):
         """
         Verify hypotheses against environment ground truth (e.g. custom_logic for light).
@@ -426,8 +625,8 @@ class HypothesisMemory(MemorySystem):
                 self._recent_ops.append({
                     'op': 'oracle_verify',
                     'mode': 'llm',
-                    'hypothesis': hyp.get('text', '')[:200],
-                    'response': response.strip()[:100],
+                    'hypothesis': hyp.get('text', ''),
+                    'response': response.strip(),
                 })
             except Exception as e:
                 print(f"Warning: Oracle LLM verification failed: {e}")
@@ -453,7 +652,7 @@ class HypothesisMemory(MemorySystem):
             self._recent_ops.append({
                 'op': 'oracle_verify',
                 'mode': 'simple',
-                'hypothesis': hyp.get('text', '')[:200],
+                'hypothesis': hyp.get('text', ''),
                 'result': result,
             })
     
@@ -620,6 +819,16 @@ Your answer (one word):"""
             'verification_mode': self.verification_mode
         }
 
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d['hypotheses'] = [dict(h) for h in self.hypotheses]
+        return d
+
+    def load_from_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        super().load_from_snapshot(snapshot)
+        if 'hypotheses' in snapshot:
+            self.hypotheses = [dict(h) for h in snapshot['hypotheses']]
+
 
 class GatedHypothesisMemory(HypothesisMemory):
     """
@@ -725,7 +934,7 @@ class GatedHypothesisMemory(HypothesisMemory):
         }
 
 
-def create_memory_system(memory_type: str, llm_client=None, obs_format='bitstring', 
+def create_memory_system(memory_type: str, llm_client=None, obs_format='bitstring',
                         verification_mode='oracle',
                         reflection_frequency=1,
                         max_text_memories=20,
@@ -743,6 +952,8 @@ def create_memory_system(memory_type: str, llm_client=None, obs_format='bitstrin
                         min_support_llm=1,
                         domain=None,
                         env_type='light',
+                        mid_episode_reflection=True,
+                        episode_reflection=True,
                         **kwargs) -> MemorySystem:
     """
     Factory function to create memory system.
@@ -765,6 +976,8 @@ def create_memory_system(memory_type: str, llm_client=None, obs_format='bitstrin
         'min_insight_length': min_insight_length,
         'max_context_items': max_context_items,
         'domain': domain,
+        'mid_episode_reflection': mid_episode_reflection,
+        'episode_reflection': episode_reflection,
         **kwargs
     }
     # Avoid passing hypothesis-specific args twice (explicit params above; also aliases from callers)
@@ -826,3 +1039,14 @@ def create_memory_system(memory_type: str, llm_client=None, obs_format='bitstrin
         return TextMemory(llm_client=llm_client, **mem_kw)
     else:
         raise ValueError(f"Unknown memory type: {memory_type}")
+
+
+def load_memory_snapshot(snapshot: Dict[str, Any], memory: MemorySystem) -> None:
+    """
+    Load a serialized memory snapshot (from MemorySystem.to_dict()) into an
+    existing memory instance. Used to hand off explore-stage memory to infer stage.
+    """
+    if snapshot and hasattr(memory, 'load_from_snapshot'):
+        memory.load_from_snapshot(snapshot)
+        stats = snapshot.get('stats', {})
+        print(f"  [memory] Loaded snapshot: {stats or snapshot.get('type', '?')}")

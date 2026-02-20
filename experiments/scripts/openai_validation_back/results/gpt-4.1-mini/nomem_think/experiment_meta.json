@@ -1,0 +1,28 @@
+{
+  "experiment_id": "exp_20260219_072602_676447",
+  "name": "gpt-4.1-mini-nomem_think",
+  "status": "completed",
+  "started_at": "2026-02-19T07:26:02.676479Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4.1-mini",
+    "memory": "nomem",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-19T07:38:05.659223Z",
+  "summary": {
+    "num_episodes": 30,
+    "num_success": 0,
+    "success_rate": 0.0,
+    "avg_steps_all": 30.0,
+    "avg_steps_success": 0.0,
+    "avg_loop_ratio": 0.3896002244160883,
+    "avg_memory_usage_rate": 0.0,
+    "avg_invalid_action_rate": 0.0
+  }
+}

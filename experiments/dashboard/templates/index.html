@@ -98,6 +98,7 @@
           <a href="{{ sort_url('finished_at', 'asc') }}" title="오래된 순" class="{{ 'active' if sort_by == 'finished_at' and sort_order == 'asc' else '' }}">▲</a>
           <a href="{{ sort_url('finished_at', 'desc') }}" title="최신 순" class="{{ 'active' if sort_by == 'finished_at' and sort_order == 'desc' else '' }}">▼</a>
         </th>
+        <th>모드</th>
         <th>소요시간</th>
         <th>진행률</th>
         <th>설정 요약</th>
@@ -117,10 +118,19 @@
         <td class="time-cell">
           <span class="time-main" data-iso="{{ e.finished_at or '' }}">{{ e.finished_at or '-' }}</span>
         </td>
+        <td style="font-size:0.82rem;color:#888;white-space:nowrap">
+          {% set m = e.config_summary.get('mode', 'infer') if e.config_summary else 'infer' %}
+          {% if m == 'pipeline' %}🔀 pipeline
+          {% elif m == 'explore' %}🔍 explore
+          {% else %}🎯 infer{% endif %}
+        </td>
         <td class="dur {{ 'live' if e.status == 'running' else '' }}"
             data-started="{{ e.started_at or '' }}"
             data-finished="{{ e.finished_at or '' }}"
-            data-status="{{ e.status }}">-</td>
+            data-status="{{ e.status }}"
+            data-mode="{{ e.config_summary.get('mode', 'infer') if e.config_summary else 'infer' }}"
+            data-explore-episodes="{{ e.config_summary.get('explore_episodes', '') if e.config_summary else '' }}"
+            data-explore-elapsed="">-</td>
         <td class="prog-cell"
             data-expid="{{ e.experiment_id }}"
             data-status="{{ e.status }}"
@@ -129,7 +139,24 @@
             <span class="prog-label">불러오는 중…</span>
           {% else %}
             {% set p = e._progress %}
-            {% if p and p.total_episodes %}
+            {% if p and p.get('mode') == 'pipeline' %}
+              {% set ep = p.get('explore', {}) %}
+              {% set ip = p.get('infer', {}) %}
+              {% set sr = ((ip.get('success_rate') or 0) * 100) | round | int %}
+              {% if e.status == 'completed' %}
+                <span style="color:#88f">완료</span>
+                <span class="prog-label">&nbsp;exp={{ ep.get('total_episodes','?') }}ep&nbsp;inf={{ ip.get('total_episodes','?') }}ep&nbsp;sr={{ sr }}%</span>
+              {% else %}
+                <span class="prog-label">exp={{ ep.get('episode',0) }}/{{ ep.get('total_episodes','?') }}&nbsp;inf={{ ip.get('episode',0) }}/{{ ip.get('total_episodes','?') }}&nbsp;sr={{ sr }}%</span>
+              {% endif %}
+              <div style="display:flex;gap:2px;margin-top:3px">
+                <div style="flex:{{ ep.get('total_episodes',1) }};background:#222;border-radius:4px 0 0 4px;height:6px">
+                  <div style="background:#4a8a4a;height:6px;border-radius:4px 0 0 4px;width:100%"></div></div>
+                <div style="flex:{{ ip.get('total_episodes',1) }};background:#222;border-radius:0 4px 4px 0;height:6px">
+                  {% set infPct = [([((ip.get('episode',0) / [ip.get('total_episodes',1),1] | max) * 100) | round | int, 0] | max), 100] | min %}
+                  <div style="background:#4a4a8a;height:6px;border-radius:0 4px 4px 0;width:{{ infPct }}%"></div></div>
+              </div>
+            {% elif p and p.total_episodes %}
               {% set ep = p.episode or 0 %}
               {% set totalEp = p.total_episodes %}
               {% set step = p.step or 0 %}
@@ -145,9 +172,15 @@
             {% endif %}
           {% endif %}
         </td>
-        <td>
+        <td style="font-size:0.82rem;color:#aaa">
           {% if e.config_summary %}
-          env={{ e.config_summary.get('env', '-') }} agent={{ e.config_summary.get('agent', '-') }} model={{ e.config_summary.get('model', '-') }} ep={{ e.config_summary.get('num_episodes', '-') }}
+          env={{ e.config_summary.get('env', '-') }}
+          agent={{ e.config_summary.get('agent', '-') }}
+          mem={{ e.config_summary.get('memory', '-') }}
+          ep={{ e.config_summary.get('num_episodes', '-') }}
+          {% if e.config_summary.get('mode') == 'pipeline' %}
+          exp={{ e.config_summary.get('explore_episodes', '-') }}
+          {% endif %}
           {% else %}-{% endif %}
         </td>
         <td class="row-actions"><a href="#" class="del row-del" data-id="{{ e.experiment_id }}">제거</a></td>
@@ -279,10 +312,62 @@
 
       function renderProg(el, p, isDone) {
         if (isDone) {
+          // Pipeline: show both stage results on completion
+          if (p && p.mode === 'pipeline') {
+            var expl = p.explore || {};
+            var inf = p.infer || {};
+            var sr = inf.success_rate != null ? (inf.success_rate * 100).toFixed(0) + '%' : '-';
+            el.innerHTML =
+              '<span class="prog-label" style="color:#88f">완료</span>&nbsp;' +
+              '<span class="prog-label">exp=' + (expl.total_episodes||'?') +
+              'ep&nbsp;&nbsp;inf=' + (inf.total_episodes||'?') +
+              'ep&nbsp;&nbsp;sr=' + sr + '</span>' +
+              '<div class="prog-bar-wrap"><div class="prog-bar done" style="width:100%"></div></div>';
+            return;
+          }
           el.innerHTML = '<span style="color:#88f">완료</span>';
           return;
         }
-        if (!p || typeof p !== 'object' || !p.total_episodes) {
+        if (!p || typeof p !== 'object') {
+          el.innerHTML = '<span class="prog-label">대기 중…</span>';
+          return;
+        }
+
+        // ── Pipeline running ──────────────────────────────────────────
+        if (p.mode === 'pipeline') {
+          var expl = p.explore || {};
+          var inf = p.infer || {};
+          var curStage = p.current_stage || 'explore';
+
+          var explPct = expl.total_episodes > 0
+            ? Math.min(Math.round(expl.episode / expl.total_episodes * 100), 100) : 0;
+          var infPct = inf.total_episodes > 0
+            ? Math.min(Math.round((inf.episode - 1 + (inf.step||0) / Math.max(inf.max_steps||1,1)) / inf.total_episodes * 100), 100) : 0;
+          infPct = Math.max(infPct, 0);
+
+          var explColor = expl.status === 'done' ? '#4a8a4a' : (expl.status === 'running' ? '#8a8a2a' : '#333');
+          var infColor  = inf.status === 'done'  ? '#4a4a8a' : (inf.status === 'running'  ? '#8a8a2a' : '#333');
+
+          var sr = inf.success_rate != null ? (inf.success_rate * 100).toFixed(0) + '%' : '-';
+          var stageLabel = curStage === 'explore'
+            ? ('🔍 Exp ' + (expl.episode||0) + '/' + (expl.total_episodes||'?'))
+            : ('🎯 Inf ' + (inf.episode||0) + '/' + (inf.total_episodes||'?') +
+               '&nbsp;step ' + (inf.step||0) + '/' + (inf.max_steps||'?') +
+               '&nbsp;sr=' + sr);
+
+          el.innerHTML =
+            '<span class="prog-label">' + stageLabel + '</span>' +
+            '<div style="display:flex;gap:2px;margin-top:3px">' +
+              '<div style="flex:' + (expl.total_episodes||1) + ';background:#222;border-radius:4px 0 0 4px;height:6px">' +
+                '<div style="background:' + explColor + ';height:6px;border-radius:4px 0 0 4px;width:' + explPct + '%"></div></div>' +
+              '<div style="flex:' + (inf.total_episodes||1) + ';background:#222;border-radius:0 4px 4px 0;height:6px">' +
+                '<div style="background:' + infColor + ';height:6px;border-radius:0 4px 4px 0;width:' + infPct + '%"></div></div>' +
+            '</div>';
+          return;
+        }
+
+        // ── Standard (infer / explore only) ───────────────────────────
+        if (!p.total_episodes) {
           el.innerHTML = '<span class="prog-label">대기 중…</span>';
           return;
         }
@@ -292,7 +377,6 @@
         var epPct = Math.round((ep - 1 + (step / maxStep)) / totalEp * 100);
         epPct = Math.min(Math.max(epPct, 0), 99);
 
-        // ETA: steps done / elapsed → remaining time
         var startedIso = el.getAttribute('data-started');
         var etaStr = '';
         if (startedIso) {

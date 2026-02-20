@@ -7,6 +7,30 @@ Constructs prompts with task description, observations, and memory context.
 from typing import List, Dict, Any, Optional
 
 
+LATENT_RULE_GUIDE = {
+    "original": """\
+### Latent Rule Guide:
+Each bulb has a hidden boolean condition. Key patterns and strategies:
+- Always available (True)     : Toggle anytime, no restriction.
+- Requires B_x ON  (B_x)     : Turn B_x on first, then toggle this bulb.
+- Requires B_x OFF (not B_x) : Handle THIS bulb BEFORE turning B_x on.
+                                At the start (all OFF), "not B_x" is already satisfied.
+- Requires all ON  (A and B) : Turn all dependencies on first.
+- Requires any ON  (A or B)  : Turn any one dependency on first.
+If a toggle fails ("remains inactive"), the condition is not yet satisfied — try other bulbs first.\
+""",
+    "research": """\
+Latent Rule Guide:
+  True      → Toggle anytime, no restriction.
+  B_x       → Turn B_x ON first.
+  not B_x   → Handle BEFORE turning B_x on (at start all=OFF, so "not B_x" is already True).
+  A and B   → Turn ALL dependencies on first.
+  A or B    → Turn ANY ONE dependency on first.
+If a toggle fails ("remains inactive"), the condition is not yet satisfied — try other bulbs first.\
+""",
+}
+
+
 class PromptBuilder:
     """
     Builds prompts for LightEnv tasks with optional memory context.
@@ -16,45 +40,68 @@ class PromptBuilder:
     - 'original': Original Odyssey-Arena format (compatible with existing baselines)
     """
     
-    def __init__(self, env_type: str = "light", template: str = "research"):
+    def __init__(self, env_type: str = "light", template: str = "original",
+                 latent_rule_guide: bool = True, include_raw_output: bool = False):
         """
         Args:
             env_type: Type of environment ('light', 'energy', etc.)
             template: Prompt template ('research' or 'original')
+            latent_rule_guide: Whether to include the Latent Rule Guide section in the prompt (default: True)
+            include_raw_output: Whether to include the previous step's full raw output
+                                (think text + action tag) in the prompt. Default: False.
         """
         self.env_type = env_type
         self.template = template
-        
-        # Task-specific instructions - Research template (default)
-        self.task_instructions_research = {
-            "light": """You are solving a light bulb puzzle. Your goal is to turn on all bulbs.
-
-- Observation format: A string of 0s and 1s (e.g., "010101"), where 1 means ON and 0 means OFF.
-- Action: Choose a bulb index to toggle (integer from 0 to num_bulbs-1).
-- Rules: Each bulb can only be toggled if certain conditions are met based on other bulbs' states.
-- Strategy: Experiment to learn which actions work in which states, then use that knowledge.
-"""
-        }
-        
-        # Task-specific instructions - Original Odyssey-Arena template
-        self.task_instructions_original = {
-            "light": """You are an intelligent agent.
-
-### Goal:
-Your mission is to light on all the bulbs.
-However, the accessibility of the bulbs is based on the current condition of other bulbs.
-You need to learn the hidden rule behind the environment and complete the task.
-
-### Action Space:
-The action space is based on the index of bulbs. For example, you would like to light on / off the first bulb, you should output <action>0</action> to toggle the state of the bulb.
-"""
-        }
+        self.latent_rule_guide = latent_rule_guide
+        self.include_raw_output = include_raw_output
+        # goal_state_str: 에피소드 시작 시 run.py에서 설정. None이면 "all ON" 설명 사용.
+        self.goal_state_str: Optional[str] = None
         
         # Select template
         if template == "original":
-            self.task_instructions = self.task_instructions_original
+            self.task_instructions = self._task_instructions_original
         else:
-            self.task_instructions = self.task_instructions_research
+            self.task_instructions = self._task_instructions_research
+
+    def _task_instructions_research(self, env_type: str) -> str:
+        if env_type == "light":
+            goal_desc = (
+                f'reach the target state "{self.goal_state_str}" '
+                f'(1=ON, 0=OFF)'
+                if self.goal_state_str is not None
+                else "turn on all bulbs"
+            )
+            return (
+                f"You are solving a light bulb puzzle. Your goal is to {goal_desc}.\n\n"
+                "- Observation format: A string of 0s and 1s (e.g., \"010101\"), where 1 means ON and 0 means OFF.\n"
+                "- Action: Choose a bulb index to toggle (integer from 0 to num_bulbs-1).\n"
+                "- Rules: Each bulb can only be toggled if certain conditions are met based on other bulbs' states.\n"
+                "- Strategy: Experiment to learn which actions work in which states, then use that knowledge.\n"
+            )
+        return ""
+
+    def _task_instructions_original(self, env_type: str) -> str:
+        if env_type == "light":
+            if self.goal_state_str is not None:
+                goal_desc = (
+                    f"Your mission is to reach the target bulb state: \"{self.goal_state_str}\" "
+                    f"(1=ON, 0=OFF).\n"
+                    "However, the accessibility of the bulbs is based on the current condition of other bulbs.\n"
+                    "You need to learn the hidden rule behind the environment and complete the task."
+                )
+            else:
+                goal_desc = (
+                    "Your mission is to light on all the bulbs.\n"
+                    "However, the accessibility of the bulbs is based on the current condition of other bulbs.\n"
+                    "You need to learn the hidden rule behind the environment and complete the task."
+                )
+            return (
+                "You are an intelligent agent.\n\n"
+                f"### Goal:\n{goal_desc}\n\n"
+                "### Action Space:\n"
+                "The action space is based on the index of bulbs. For example, you would like to light on / off the first bulb, you should output <action>0</action> to toggle the state of the bulb.\n"
+            )
+        return ""
     
     def build_prompt(
         self,
@@ -95,9 +142,14 @@ The action space is based on the index of bulbs. For example, you would like to 
         """Build research-style prompt (concise, structured)."""
         prompt_parts = []
         
-        # Task instructions
-        prompt_parts.append(self.task_instructions[self.env_type])
+        # Task instructions (callable로 변경됨)
+        prompt_parts.append(self.task_instructions(self.env_type))
         prompt_parts.append("")
+
+        # Latent Rule Guide (optional)
+        if self.latent_rule_guide and self.env_type in LATENT_RULE_GUIDE:
+            prompt_parts.append(LATENT_RULE_GUIDE["research"])
+            prompt_parts.append("")
         
         # Memory context (if available)
         if memory_context:
@@ -109,11 +161,26 @@ The action space is based on the index of bulbs. For example, you would like to 
         if history and len(history) > 0:
             prompt_parts.append("=== RECENT HISTORY ===")
             for h in history:
-                line = f"Step {h['step']}: State={h['obs']}, Action={h['action']} -> {h['result']}"
-                if h.get('think'):
-                    line += f"\n  Reasoning: {h['think']}"
+                think = h.get('think', '').strip()
+                if think:
+                    prompt_parts.append(f"[Reasoning] {think}")
+                if h.get('invalid_output'):
+                    inv_preview = h['invalid_output'][:120].replace('\n', ' ')
+                    line = (f"Step {h['step']}: State={h['obs']}, "
+                            f"Action=INVALID (parse failed, random fallback={h['action']}) -> {h['result']}"
+                            f"\n  [UNPARSEABLE OUTPUT]: \"{inv_preview}\"")
+                else:
+                    line = f"Step {h['step']}: State={h['obs']}, Action={h['action']} -> {h['result']}"
                 prompt_parts.append(line)
             prompt_parts.append("")
+
+            # Previous step full output (opt-in via include_raw_output, default off)
+            if self.include_raw_output:
+                last = history[-1]
+                if last.get('raw_output'):
+                    prompt_parts.append("=== PREVIOUS STEP FULL OUTPUT ===")
+                    prompt_parts.append(last['raw_output'])
+                    prompt_parts.append("")
 
         # Current situation
         prompt_parts.append("=== CURRENT SITUATION ===")
@@ -121,7 +188,7 @@ The action space is based on the index of bulbs. For example, you would like to 
         prompt_parts.append(f"Current state: {observation}")
         prompt_parts.append(f"Valid actions: 0 to {num_actions - 1}")
         prompt_parts.append("")
-        prompt_parts.append("Think step by step about the best action, then output your action in the format: <action>n</action>")
+        prompt_parts.append("Think step by step about the best action, then output your action in the format: <action>n</action>.\n")
         
         return "\n".join(prompt_parts)
     
@@ -136,9 +203,14 @@ The action space is based on the index of bulbs. For example, you would like to 
         """Build original Odyssey-Arena style prompt (compatible with baselines)."""
         prompt_parts = []
         
-        # Task instructions
-        prompt_parts.append(self.task_instructions[self.env_type])
+        # Task instructions (callable로 변경됨)
+        prompt_parts.append(self.task_instructions(self.env_type))
         prompt_parts.append("")
+
+        # Latent Rule Guide (optional)
+        if self.latent_rule_guide and self.env_type in LATENT_RULE_GUIDE:
+            prompt_parts.append(LATENT_RULE_GUIDE["original"])
+            prompt_parts.append("")
         
         # Learned Knowledge (if available) - inserted after goal
         if memory_context:
@@ -150,10 +222,29 @@ The action space is based on the index of bulbs. For example, you would like to 
         prompt_parts.append("### History Action and Feedback:")
         if history and len(history) > 0:
             for h in history:
-                # Original format: "Action: {action}, Feedback: {feedback}, State: {obs}"
-                prompt_parts.append(
-                    f"Action: {h['action']}, Feedback: {h['result']}, State: {h['obs']}"
-                )
+                think = h.get('think', '').strip()
+                if think:
+                    prompt_parts.append(f"[Reasoning] {think}")
+                if h.get('invalid_output'):
+                    inv_preview = h['invalid_output'][:120].replace('\n', ' ')
+                    prompt_parts.append(
+                        f"Action: INVALID (parse failed, random fallback={h['action']}), "
+                        f"Feedback: {h['result']}, State: {h['obs']}"
+                        f"\n  [UNPARSEABLE OUTPUT]: \"{inv_preview}\""
+                    )
+                else:
+                    prompt_parts.append(
+                        f"Action: {h['action']}, Feedback: {h['result']}, State: {h['obs']}"
+                    )
+            prompt_parts.append("")
+
+            # Previous step full output (opt-in via include_raw_output, default off)
+            if self.include_raw_output:
+                last = history[-1]
+                if last.get('raw_output'):
+                    prompt_parts.append("### Previous Step Full Output:")
+                    prompt_parts.append(last['raw_output'])
+                    prompt_parts.append("")
         else:
             prompt_parts.append("(No history yet)")
         prompt_parts.append("")
@@ -164,9 +255,9 @@ The action space is based on the index of bulbs. For example, you would like to 
         prompt_parts.append("")
         
         # Instructions
-        prompt_parts.append("Now think step by step and choose the next action to act in the environment.")
+        prompt_parts.append("Now THINK step by step and choose the next ACTION to act in the environment.")
         prompt_parts.append("You are encouraged to act actively to derive the environment dynamics.")
-        prompt_parts.append("Output ONLY one action in the format: <action>n</action>")
+        prompt_parts.append("To act, output ONLY one action in the format: <action>n</action>. You should strictly follow the format to act.")
         
         return "\n".join(prompt_parts)
     

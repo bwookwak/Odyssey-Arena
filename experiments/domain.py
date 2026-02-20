@@ -18,11 +18,65 @@ class DomainAdapter(ABC):
     and parsing hypothesis text into structured form for verification.
     """
     
+    def task_description(self) -> str:
+        """Short description of the task, used as context in reflection prompts."""
+        return "Reach the goal state through sequential actions."
+
+    def build_midep_reflection_prompt(self, raw_experiences: list) -> str:
+        """
+        Build the mid-episode (every-k-steps) reflector prompt.
+
+        Includes: reasoning trace, last predicted action, env feedback, recent trajectory.
+        Excludes: ground truth, bullet_tags.
+        Output format: JSON with reasoning/error_identification/root_cause_analysis/
+                        correct_approach/key_insight.
+
+        Default implementation uses the old plain-text format via reflection_instructions().
+        Override in concrete domains for the structured JSON format.
+        """
+        exp_lines = []
+        for i, exp in enumerate(raw_experiences, 1):
+            obs_change = f"{exp['obs_before']} -> {exp['obs_after']}"
+            exp_lines.append(f"{i}. Action {exp['action']}: {obs_change}")
+        experiences_text = "\n".join(exp_lines)
+        instructions = self.reflection_instructions()
+        return (
+            "You are the Reflector: extract concrete insights from trajectory.\n\n"
+            f"Recent experiences:\n{experiences_text}\n\n{instructions}"
+        )
+
+    def build_episode_reflection_prompt(
+        self, trajectory: list, success: bool, task_context: str = ""
+    ) -> str:
+        """
+        Build the post-episode reflector prompt.
+
+        Includes: env feedback, full trajectory, task outcome (after trajectory).
+        Excludes: reasoning trace, predicted answer, ground truth, bullet_tags.
+        Output format: JSON with reasoning/error_identification/root_cause_analysis/
+                        correct_approach/key_insights (list, 2-5 items).
+
+        Default implementation produces a minimal prompt.
+        Override in concrete domains for richer format.
+        """
+        traj_lines = [
+            f"{i+1}. before={s['obs_before']} action={s['action']} after={s['obs_after']}"
+            for i, s in enumerate(trajectory)
+        ]
+        outcome = "SUCCESS" if success else "FAILURE"
+        ctx = task_context or self.task_description()
+        return (
+            f"Task: {ctx}\n\n"
+            f"Trajectory:\n" + "\n".join(traj_lines) + "\n\n"
+            f"Outcome: {outcome}\n\n"
+            'Output JSON: {"key_insights": ["insight 1", "insight 2", ...]}'
+        )
+
     @abstractmethod
     def reflection_instructions(self) -> str:
         """
         Instructions and format examples for the Reflector (what to extract from experiences).
-        Appended after "Recent experiences: ..." in the reflection prompt.
+        Used as fallback in the default build_midep_reflection_prompt().
         """
         pass
     
@@ -95,7 +149,168 @@ class LightDomain(DomainAdapter):
     - Ground truth: custom_logic Dict[str, str] e.g. {"B0": "True", "B1": "B0"}
     - Hypotheses: "Toggling bulb X affects bulb Y" style
     """
-    
+
+    def task_description(self) -> str:
+        return (
+            "Light Bulb Puzzle: toggle bulbs to reach the target state. "
+            "Each action is a bulb index (0-based integer). "
+            "Bulbs have hidden toggle conditions — a bulb can only be toggled "
+            "when its hidden condition (which depends on other bulbs' states) is met. "
+            "Discover these rules through experimentation."
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Mid-episode (k-step) reflector prompt                              #
+    # ------------------------------------------------------------------ #
+
+    def build_midep_reflection_prompt(self, raw_experiences: list) -> str:
+        """
+        K-step reflector prompt (called every reflection_frequency steps during episode).
+
+        Includes : reasoning trace, model's last action (predicted answer), env feedback,
+                   recent trajectory.
+        Excludes : ground truth answer, bullet_tags.
+        Output   : JSON with key_insight (singular).
+        """
+        # ── Trajectory ────────────────────────────────────────────────
+        traj_lines = []
+        for i, exp in enumerate(raw_experiences, 1):
+            traj_lines.append(
+                f"  {i}. before={exp['obs_before']}  action={exp['action']}  "
+                f"after={exp['obs_after']}  feedback={exp.get('feedback', '')}"
+            )
+        trajectory_text = "\n".join(traj_lines) or "  (none)"
+
+        # ── Reasoning trace (think text per step) ─────────────────────
+        think_parts = []
+        for i, exp in enumerate(raw_experiences, 1):
+            think = (exp.get('think') or '').strip()
+            if think:
+                think_parts.append(f"  Step {i}: {think[:300]}")
+        reasoning_trace = "\n".join(think_parts) or "  (not available)"
+
+        # ── Predicted answer: last action and resulting state ──────────
+        if raw_experiences:
+            last = raw_experiences[-1]
+            predicted_answer = (
+                f"action={last['action']} → state={last['obs_after']}"
+            )
+        else:
+            predicted_answer = "(none)"
+
+        # ── Environment feedback ───────────────────────────────────────
+        fb_lines = [exp.get('feedback', '') for exp in raw_experiences if exp.get('feedback')]
+        env_feedback = "\n".join(f"  {fb}" for fb in fb_lines) or "  (none)"
+
+        return f"""You are a Reflector.
+
+Your job is to analyze recent trajectory data from a light bulb puzzle and extract a concrete insight about the hidden toggle rules.
+
+Task Context:
+  {self.task_description()}
+
+Model's Reasoning Trace (recent steps):
+{reasoning_trace}
+
+Model's Last Action:
+  {predicted_answer}
+
+Environment Feedback:
+{env_feedback}
+
+RECENT TRAJECTORY:
+{trajectory_text}
+
+Answer in this exact JSON format:
+{{
+  "reasoning": "[Your analysis of which actions worked or failed and why]",
+  "error_identification": "[What went wrong or was inefficient in the recent steps?]",
+  "root_cause_analysis": "[Why? Which hidden rule or dependency was missed?]",
+  "correct_approach": "[What should the model try next?]",
+  "key_insight": "[One concrete, specific rule discovered, e.g. \\"Toggling bulb X only works when bulb Y is ON\\"]"
+}}
+
+Output only the JSON object. No additional text."""
+
+    # ------------------------------------------------------------------ #
+    #  Post-episode reflector prompt                                      #
+    # ------------------------------------------------------------------ #
+
+    def build_episode_reflection_prompt(
+        self, trajectory: list, success: bool, task_context: str = ""
+    ) -> str:
+        """
+        Post-episode reflector prompt (called once after episode ends).
+
+        Includes : env feedback, full trajectory, task outcome (placed AFTER trajectory).
+        Excludes : reasoning trace, predicted answer, ground truth answer, bullet_tags.
+        Output   : JSON with key_insights (list, 2-5 items).
+        """
+        # ── Environment feedback (step-level messages) ─────────────────
+        fb_lines = []
+        for s in trajectory:
+            fb = (s.get('feedback') or '').strip()
+            if fb:
+                fb_lines.append(f"  step {s['step']}: {fb}")
+        env_feedback = "\n".join(fb_lines) or "  (none)"
+
+        # ── Full trajectory ────────────────────────────────────────────
+        traj_lines = []
+        for s in trajectory:
+            loop_flag = " [LOOP]" if s.get('is_loop') else ""
+            traj_lines.append(
+                f"  step={s['step']}  before={s['obs_before']}  "
+                f"action={s['action']}  after={s['obs_after']}{loop_flag}"
+            )
+        trajectory_text = "\n".join(traj_lines) or "  (none)"
+
+        # ── Task outcome (AFTER trajectory, as specified) ──────────────
+        last = trajectory[-1] if trajectory else {}
+        final_state = last.get('obs_after', '?')
+        outcome = (
+            f"SUCCESS — reached goal state (final: {final_state})"
+            if success
+            else f"FAILURE — did not reach goal within budget (final: {final_state})"
+        )
+
+        ctx = task_context or self.task_description()
+
+        return f"""You are a Reflector.
+
+Your job is to analyze a complete episode trajectory from a light bulb puzzle and extract multiple concrete insights about the hidden toggle rules.
+
+Task Context:
+  {ctx}
+
+Environment Feedback:
+{env_feedback}
+
+FULL TRAJECTORY:
+{trajectory_text}
+
+Task Outcome:
+  {outcome}
+
+Answer in this exact JSON format:
+{{
+  "reasoning": "[Your analysis of patterns across the full episode — which sequences worked, which failed, and why]",
+  "error_identification": "[What were the main inefficiencies or wrong moves?]",
+  "root_cause_analysis": "[Which hidden rules or dependencies were misunderstood or unknown?]",
+  "correct_approach": "[What sequence of actions would have been more efficient?]",
+  "key_insights": [
+    "[Concrete rule 1, e.g. \\"Toggling bulb X only succeeds when bulb Y is ON\\"]",
+    "[Concrete rule 2, ...]",
+    "[Concrete rule 3, ...]"
+  ]
+}}
+
+Provide 2-5 key_insights. Each must be a specific, concrete rule about bulb toggle dependencies (e.g. which bulbs must be ON/OFF for an action to take effect).
+Output only the JSON object. No additional text."""
+
+    # ------------------------------------------------------------------ #
+    #  Existing methods (unchanged)                                       #
+    # ------------------------------------------------------------------ #
+
     def reflection_instructions(self) -> str:
         return """Analyze and distill concrete insights about which actions affect which bulbs.
 Use EXPLICIT format: "Toggling bulb X affects bulb Y" or "Action X flips bulb Y".

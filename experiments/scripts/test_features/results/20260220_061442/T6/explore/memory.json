@@ -1,0 +1,51 @@
+{
+  "type": "HypothesisMemory",
+  "text_memories": [],
+  "hypotheses": [
+    {
+      "text": "Toggling bulb B5 only succeeds when bulbs B0, B1, B2, B3, and B4 are OFF.",
+      "support": 1,
+      "contradict": 0,
+      "confidence": 0.73,
+      "source": "episode_reflection",
+      "created_at": 0
+    },
+    {
+      "text": "Toggling bulb B4 is effective only when bulb B2 is ON.",
+      "support": 1,
+      "contradict": 0,
+      "confidence": 0.73,
+      "source": "episode_reflection",
+      "created_at": 1
+    },
+    {
+      "text": "Toggling bulb B3 only changes state when bulb B4 is OFF.",
+      "support": 1,
+      "contradict": 0,
+      "confidence": 0.73,
+      "source": "episode_reflection",
+      "created_at": 2
+    },
+    {
+      "text": "Toggling bulb B2 is ineffective if bulb B1 is OFF.",
+      "support": 1,
+      "contradict": 0,
+      "confidence": 0.73,
+      "source": "episode_reflection",
+      "created_at": 3
+    },
+    {
+      "text": "Repeated toggling of the same bulb without changing the states of dependent bulbs leads to loops and wasted moves.",
+      "support": 1,
+      "contradict": 0,
+      "confidence": 0.73,
+      "source": "episode_reflection",
+      "created_at": 4
+    }
+  ],
+  "stats": {
+    "num_hypotheses": 5,
+    "memory_size": 5,
+    "verification_mode": "oracle"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "experiment_id": "exp_20260219_110543_035033",
+  "name": "gemini-2.5-pro-preview-03-25-nomem_nothink",
+  "status": "running",
+  "started_at": "2026-02-19T11:05:43.035067Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gemini-2.5-pro-preview-03-25",
+    "memory": "nomem",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  }
+}

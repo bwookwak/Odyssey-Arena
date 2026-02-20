@@ -7,14 +7,16 @@ import numpy as np
 from collections import deque
 
 class LightBulbEnv:
-    def __init__(self, num_bulbs=5, seed=None, max_attempts=100, min_steps=5, expose_logic=False, custom_logic=None):
+    def __init__(self, num_bulbs=5, seed=None, max_attempts=100, min_steps=5, expose_logic=False, custom_logic=None, goal_state=None):
         self.num_bulbs = num_bulbs
         self.rng = random.Random(seed)
         self.seed_value = seed
         self.max_attempts = max_attempts
         self.min_steps = min_steps
         self.expose_logic = expose_logic
-        self.custom_logic = custom_logic  # 👈 新增参数
+        self.custom_logic = custom_logic
+        # goal_state: list[bool] 길이 num_bulbs. None이면 전부 True(기존 동작)
+        self.goal_state = goal_state if goal_state is not None else [True] * num_bulbs
         self.reset()
 
     # ---------------------------
@@ -119,11 +121,13 @@ class LightBulbEnv:
     # ---------------------------
     def _validate_min_steps(self):
         """
-        验证从全 False 状态存在操作序列能点亮所有灯泡，
+        验证从全 False 状态存在操作序列能到达目标状态，
         且最少操作步数 >= self.min_steps
         """
         bulbs_list = list(self.bulbs.keys())
         visited = set()
+        # bulbs_list 순서 기준으로 goal_key를 맞춰야 state.values()와 비교 가능
+        goal_key = tuple(self.goal_state[int(b[1:])] for b in bulbs_list)
 
         def dfs(state, path_len):
             key = tuple(state.values())
@@ -131,7 +135,7 @@ class LightBulbEnv:
                 return None
             visited.add(key)
 
-            if all(state.values()):
+            if key == goal_key:
                 return path_len
             min_len = None
             for bulb in bulbs_list:
@@ -180,7 +184,8 @@ class LightBulbEnv:
         else:
             hint = f"{bulb_name} remains inactive... remaining bulbs should be in specific mode."
 
-        done = all(self.bulbs.values())
+        current = [self.bulbs[f"B{i}"] for i in range(self.num_bulbs)]
+        done = (current == self.goal_state)
         return self._get_obs(), hint, done, {}
 
     # ---------------------------

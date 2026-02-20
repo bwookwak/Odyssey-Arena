@@ -51,26 +51,33 @@ class LightEnvWrapper(BaseEnvWrapper):
     - 'emoji': "💡 ○ 💡 ○ 💡 ○" (emojis, compatible with original Odyssey-Arena)
     
     Action: integer in [0, num_bulbs)
-    done: True when all bulbs are on (success)
+    done: True when current state matches goal_state (success)
+    goal_state: list[bool] target state. None defaults to all-True (original task).
     """
     
-    def __init__(self, custom_logic, num_bulbs, seed=None, obs_format='bitstring'):
+    def __init__(self, custom_logic, num_bulbs, seed=None, obs_format='bitstring', goal_state=None):
         """
         Args:
             custom_logic: Dict mapping bulb names to boolean expressions
             num_bulbs: Number of bulbs (level)
             seed: Random seed for environment
             obs_format: Observation format ('bitstring' or 'emoji')
+            goal_state: Target state as list[bool]. None → all True (original task).
         """
         self.env = LightBulbEnv(
             num_bulbs=num_bulbs,
             custom_logic=custom_logic,
             seed=seed,
-            expose_logic=False
+            expose_logic=False,
+            goal_state=goal_state,
         )
         self.num_bulbs = num_bulbs
         self.custom_logic = custom_logic
         self.obs_format = obs_format
+        # goal_state as list[bool] (resolved inside LightBulbEnv)
+        self.goal_state = self.env.goal_state
+        # goal_state as normalized string (same format as observations)
+        self.goal_state_str = self._normalize_obs(self.goal_state)
         
     def reset(self):
         """Reset environment and return initial observation."""
@@ -90,8 +97,8 @@ class LightEnvWrapper(BaseEnvWrapper):
         obs_list, hint, done, info = self.env.step(action)
         obs = self._normalize_obs(obs_list)
         
-        # Calculate progress (number of bulbs that are on)
-        progress = sum(obs_list)
+        # progress: goal 상태와 일치하는 전구 수
+        progress = sum(a == b for a, b in zip(obs_list, self.goal_state))
         info['progress'] = progress
         
         return obs, hint, done, info
@@ -155,7 +162,8 @@ def create_env(env_type, task_data, seed=None, obs_format='bitstring'):
             custom_logic=task_data['custom_logic'],
             num_bulbs=task_data['level'],
             seed=seed,
-            obs_format=obs_format
+            obs_format=obs_format,
+            goal_state=task_data.get('goal_state', None),
         )
     else:
         raise NotImplementedError(f"Environment {env_type} not yet implemented")

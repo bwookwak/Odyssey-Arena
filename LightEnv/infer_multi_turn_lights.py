@@ -47,21 +47,29 @@ def extract_action(text: str) -> str:
         return m.group(1).strip()
     return ""
 
-def generate_prompt(env, history, feedback):
+def generate_prompt(env, history, feedback, goal_state_str=None):
     """生成 LLM 的输入 prompt"""
-    # desc = env.describe()
-    # grid_text = env.render_text()
-    # goal_hint = env.goal_hint
     grid_text = env.return_obs()
     history_text = "\n".join(history)
+
+    if goal_state_str is not None:
+        goal_desc = (
+            f"Your mission is to reach the target bulb state: \"{goal_state_str}\" (💡=ON, ○=OFF).\n"
+            "However, the accessibility of the bulbs is based on the current condition of other bulbs.\n"
+            "You need to learn the hidden rule behind the environment and complete the task."
+        )
+    else:
+        goal_desc = (
+            "Your mission is to light on all the bulbs.\n"
+            "However, the accessibility of the bulbs is based on the current condition of other bulbs.\n"
+            "You need to learn the hidden rule behind the environment and complete the task."
+        )
 
     prompt = f"""
 You are an intelligent agent.
 
 ### Goal:
-Your mission is to light on all the bulbs.
-However, the accessibility of the bulbs is based on the current condition of other bulbs.
-You need to learn the hidden rule behind the environment and complete the task.
+{goal_desc}
 
 ### Action Space:
 The action space is based on the index of bulbs. For example, you would like to light on / off the first bulb, you should \
@@ -81,23 +89,27 @@ Output ONLY one action in the format: <action>n</action>
 
 # ------------------- 主逻辑 -------------------
 def infer():
-    with open(f"test_data/turnonlights/test_turnonlights_lite_251030.json", 'r') as file:
+    with open(f"test_data/turnonlights/test_turnonlights_lite_251030_augmented.json", 'r') as file:
         test_data = json.load(file)
     args.num_test_data = len(test_data)
     results = []
     for env_idx in range(args.num_test_data):
         print(f"\n===== [Env {env_idx+1}/{args.num_test_data}] =====")
         d = test_data[env_idx]
-        env = LightBulbEnv(custom_logic=d["custom_logic"], num_bulbs=d["level"])
-        # env.reset()
+        goal_state = d.get("goal_state", None)
+        env = LightBulbEnv(custom_logic=d["custom_logic"], num_bulbs=d["level"], goal_state=goal_state)
+        # goal_state를 return_obs() 형식으로 변환 (💡/○)
+        goal_state_str = " ".join("💡" for _ in range(env.num_bulbs)) if goal_state is None else \
+            " ".join("💡" if b else "○" for b in goal_state)
         history = []
         feedback = ""
-        traj = {"env_id": env_idx, "level": d["level"], "custom_logic": d["custom_logic"], "initial_state": env.return_obs(), \
-                    "num_steps": 0, "steps": [], "token_num_total": 0, "success": False}
+        traj = {"env_id": env_idx, "level": d["level"], "custom_logic": d["custom_logic"],
+                "goal_state": goal_state, "initial_state": env.return_obs(),
+                "num_steps": 0, "steps": [], "token_num_total": 0, "success": False}
         done = False
         token_num_total = 0
         for step in range(args.max_steps):
-            user_prompt = generate_prompt(env, history, feedback)
+            user_prompt = generate_prompt(env, history, feedback, goal_state_str=goal_state_str)
             chat_inputs = policy_tokenizer.apply_chat_template(
                 [{"role": "user", "content": user_prompt}],
                 tokenize=False,

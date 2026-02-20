@@ -1,0 +1,28 @@
+{
+  "experiment_id": "exp_20260219_072602_681358",
+  "name": "gpt-4.1-mini-gated_observation",
+  "status": "completed",
+  "started_at": "2026-02-19T07:26:02.681387Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4.1-mini",
+    "memory": "gated",
+    "verification_mode": "observation",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-19T07:55:02.662195Z",
+  "summary": {
+    "num_episodes": 30,
+    "num_success": 0,
+    "success_rate": 0.0,
+    "avg_steps_all": 24.833333333333332,
+    "avg_steps_success": 0.0,
+    "avg_loop_ratio": 0.4120595364559615,
+    "avg_memory_usage_rate": 0.9410405314021492,
+    "avg_invalid_action_rate": 0.0
+  }
+}

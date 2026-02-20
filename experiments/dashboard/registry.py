@@ -76,6 +76,8 @@ def register_start(output_dir: str, config: Dict[str, Any], name: Optional[str] 
         "num_episodes": config.get("num_episodes"),
         "max_steps": config.get("max_steps"),
         "seed": config.get("seed"),
+        "mode": config.get("mode", "infer"),
+        "explore_episodes": config.get("explore_episodes"),
     }
     started_at = datetime.utcnow().isoformat() + "Z"
     entry = {

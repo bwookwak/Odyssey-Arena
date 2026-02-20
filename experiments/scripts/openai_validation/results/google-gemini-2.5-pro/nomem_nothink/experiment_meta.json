@@ -1,0 +1,30 @@
+{
+  "experiment_id": "exp_20260219_112157_259372",
+  "name": "google-gemini-2.5-pro-nomem_nothink",
+  "status": "completed",
+  "started_at": "2026-02-19T11:21:57.259406Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "google/gemini-2.5-pro",
+    "memory": "nomem",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-19T13:55:21.810419Z",
+  "summary": {
+    "num_episodes": 30,
+    "num_success": 6,
+    "success_rate": 0.2,
+    "avg_steps_all": 125.76666666666667,
+    "avg_steps_success": 75.33333333333333,
+    "avg_loop_ratio": 0.2495609408554523,
+    "avg_memory_usage_rate": 0.0,
+    "avg_invalid_action_rate": 0.6093526421326847,
+    "avg_max_progress": 6.7667,
+    "avg_avg_progress": 3.9078
+  }
+}

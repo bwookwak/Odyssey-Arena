@@ -7,7 +7,7 @@
   <style>
     * { box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem 2rem; background: #0f0f12; color: #e0e0e0; }
-    h1, h2 { margin-top: 0; }
+    h1, h2, h3 { margin-top: 0; }
     a { color: #7cb8ff; text-decoration: none; }
     a:hover { text-decoration: underline; }
     .status { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; }
@@ -23,17 +23,166 @@
     details.step-block { margin-left: 1rem; margin-bottom: 0.25rem; }
     details.step-block summary { cursor: pointer; color: #aaa; font-size: 0.9rem; }
     .step-inout h4 { margin: 0.5rem 0 0.25rem; color: #888; font-size: 0.9rem; }
+
+    /* Stage tabs */
+    .stage-tabs { display: flex; gap: 0; margin-bottom: 0; border-bottom: 2px solid #333; }
+    .stage-tab {
+      padding: 0.5rem 1.25rem; cursor: pointer; font-size: 0.95rem;
+      border: 1px solid #333; border-bottom: none;
+      background: #1a1a1f; color: #aaa; margin-right: 2px; border-radius: 4px 4px 0 0;
+      user-select: none;
+    }
+    .stage-tab.active { background: #0f0f12; color: #e0e0e0; border-bottom: 2px solid #0f0f12; margin-bottom: -2px; }
+    .stage-tab:hover:not(.active) { background: #252530; color: #ddd; }
+    .stage-panel { display: none; padding-top: 1rem; }
+    .stage-panel.active { display: block; }
+
+    /* Stage status badge */
+    .stage-status { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.8rem; margin-left: 0.5rem; }
+    .stage-status.done { background: #2a4a2a; color: #8f8; }
+    .stage-status.running { background: #4a4a1a; color: #ff8; }
+    .stage-status.pending { background: #333; color: #888; }
+
+    /* Pipeline overview bar */
+    .pipeline-bar { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1.2rem; padding: 0.75rem 1rem; background: #1a1a1f; border-radius: 6px; }
+    .pipeline-stage { padding: 0.3rem 0.8rem; border-radius: 4px; font-size: 0.9rem; }
+    .pipeline-stage.done { background: #2a3a2a; color: #8f8; }
+    .pipeline-stage.running { background: #3a3a1a; color: #ff8; }
+    .pipeline-stage.pending { background: #222; color: #666; }
+    .pipeline-arrow { color: #555; font-size: 1.2rem; }
+    .pipeline-elapsed { color: #888; font-size: 0.82rem; margin-left: 0.4rem; }
+
+    /* Memory snapshot badge */
+    .mem-badge { display: inline-block; padding: 0.2rem 0.6rem; background: #2a3a4a; color: #7cb8ff; border-radius: 4px; font-size: 0.82rem; margin-left: 0.5rem; }
   </style>
 </head>
 <body>
   <p><a href="{{ url_for('index') }}">← 목록</a></p>
-  <h1>{{ entry.name or entry.experiment_id }} <span class="status {{ entry.status }}">{{ entry.status }}</span></h1>
-  <p class="meta">ID: {{ entry.experiment_id }} · 시작: {{ entry.started_at }} · 종료: {{ entry.finished_at or '-' }} · 출력: {{ entry.output_dir }}</p>
+  <h1>
+    {{ entry.name or entry.experiment_id }}
+    <span class="status {{ entry.status }}">{{ entry.status }}</span>
+    {% if mode == 'pipeline' %}<span style="color:#888;font-size:0.85rem;margin-left:0.5rem">🔀 pipeline</span>{% endif %}
+    {% if mode == 'explore' %}<span style="color:#888;font-size:0.85rem;margin-left:0.5rem">🔍 explore</span>{% endif %}
+  </h1>
+  <p class="meta">
+    ID: {{ entry.experiment_id }} &nbsp;·&nbsp;
+    시작: {{ entry.started_at }} &nbsp;·&nbsp;
+    종료: {{ entry.finished_at or '-' }} &nbsp;·&nbsp;
+    출력: {{ entry.output_dir }}
+  </p>
+
+  <!-- ── Pipeline mode: overview bar ── -->
+  {% if mode == 'pipeline' %}
+  {% set ep = progress.get('explore', {}) %}
+  {% set ip = progress.get('infer', {}) %}
+  <div class="pipeline-bar">
+    <div class="pipeline-stage {{ ep.get('status', 'pending') }}">
+      🔍 Explore
+      <span class="pipeline-elapsed">{{ ep.get('total_episodes', '?') }} ep</span>
+      {% if ep.get('elapsed_sec') %}<span class="pipeline-elapsed">{{ ep.get('elapsed_sec') }}s</span>{% endif %}
+    </div>
+    <div class="pipeline-arrow">→</div>
+    {% if has_memory_snapshot %}<span class="mem-badge">💾 memory.json</span>{% endif %}
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-stage {{ ip.get('status', 'pending') }}">
+      🎯 Infer
+      <span class="pipeline-elapsed">{{ ip.get('total_episodes', '?') }} ep</span>
+      {% if ip.get('elapsed_sec') %}<span class="pipeline-elapsed">{{ ip.get('elapsed_sec') }}s</span>{% endif %}
+      {% if ip.get('success_rate') is not none %}<span class="pipeline-elapsed">sr={{ (ip.get('success_rate', 0) * 100) | round | int }}%</span>{% endif %}
+    </div>
+  </div>
+  {% endif %}
 
   <div class="block">
     <h2>설정 (config)</h2>
     <pre>{{ config_str or '(config.json 없음)' }}</pre>
   </div>
+
+  <!-- ── Pipeline mode: tabbed UI ── -->
+  {% if mode == 'pipeline' %}
+
+  <div class="block">
+    <h2>요약</h2>
+    <div class="stage-tabs">
+      <div class="stage-tab active" data-tab="infer-summary">
+        🎯 Infer 요약
+        {% set ip = progress.get('infer', {}) %}
+        <span class="stage-status {{ ip.get('status', 'pending') }}">{{ ip.get('status', 'pending') }}</span>
+      </div>
+      <div class="stage-tab" data-tab="explore-summary">
+        🔍 Explore 요약
+        {% set ep = progress.get('explore', {}) %}
+        <span class="stage-status {{ ep.get('status', 'pending') }}">{{ ep.get('status', 'pending') }}</span>
+      </div>
+    </div>
+    <div class="stage-panel active" id="infer-summary">
+      <pre>{{ infer_summary_str or '(summary 없음)' }}</pre>
+    </div>
+    <div class="stage-panel" id="explore-summary">
+      <pre>{{ explore_summary_str or '(summary 없음)' }}</pre>
+    </div>
+  </div>
+
+  <div class="block">
+    <h2>Step별 상세 (에피소드·스텝별 Input / Output / Memory ops)</h2>
+    <div class="stage-tabs">
+      <div class="stage-tab active" data-tab="infer-ep">🎯 Infer 에피소드</div>
+      <div class="stage-tab" data-tab="explore-ep">🔍 Explore 에피소드</div>
+    </div>
+
+    <div class="stage-panel active" id="infer-ep">
+      {% for ep in infer_episodes %}
+      <details class="ep-block">
+        <summary>에피소드 {{ ep.episode_idx + 1 }} (level {{ ep.task_level }}) · {{ ep.num_steps }} steps · {{ '성공' if ep.success else '실패' }}</summary>
+        {% for s in ep.steps %}
+        <details class="step-block">
+          <summary>Step {{ s.step }} · action={{ s.action }} · progress={{ s.progress }} · mem={{ s.memory_used }}</summary>
+          <div class="step-inout">
+            <h4>Input (to model)</h4>
+            <pre>{{ s.model_input or '(없음)' }}</pre>
+            <h4>Output</h4>
+            <pre>{{ s.model_output or s.llm_raw_output or '(없음)' }}</pre>
+            {% if s.memory_ops %}
+            <h4>Memory ops</h4>
+            <pre>{{ s.memory_ops | truncate_ops }}</pre>
+            {% endif %}
+          </div>
+        </details>
+        {% endfor %}
+      </details>
+      {% else %}
+      <p>infer 에피소드 없음.</p>
+      {% endfor %}
+    </div>
+
+    <div class="stage-panel" id="explore-ep">
+      {% for ep in explore_episodes %}
+      <details class="ep-block">
+        <summary>에피소드 {{ ep.episode_idx + 1 }} (level {{ ep.task_level }}) · {{ ep.num_steps }} steps · {{ '성공' if ep.success else '실패' }}</summary>
+        {% for s in ep.steps %}
+        <details class="step-block">
+          <summary>Step {{ s.step }} · action={{ s.action }} · progress={{ s.progress }} · mem={{ s.memory_used }}</summary>
+          <div class="step-inout">
+            <h4>Input (to model)</h4>
+            <pre>{{ s.model_input or '(없음)' }}</pre>
+            <h4>Output</h4>
+            <pre>{{ s.model_output or s.llm_raw_output or '(없음)' }}</pre>
+            {% if s.memory_ops %}
+            <h4>Memory ops</h4>
+            <pre>{{ s.memory_ops | truncate_ops }}</pre>
+            {% endif %}
+          </div>
+        </details>
+        {% endfor %}
+      </details>
+      {% else %}
+      <p>explore 에피소드 없음.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- ── Explore / Infer-only: original single-stage view ── -->
+  {% else %}
 
   <div class="block">
     <h2>요약 (summary)</h2>
@@ -55,7 +204,7 @@
           <pre>{{ s.model_output or s.llm_raw_output or '(없음)' }}</pre>
           {% if s.memory_ops %}
           <h4>Memory ops</h4>
-          <pre>{{ s.memory_ops | tojson }}</pre>
+          <pre>{{ s.memory_ops | truncate_ops }}</pre>
           {% endif %}
         </div>
       </details>
@@ -66,9 +215,28 @@
     {% endfor %}
   </div>
 
+  {% endif %}
+
   <div class="block">
     <h2>로그 (run.log, 최근)</h2>
     <pre>{{ log_content }}</pre>
   </div>
+
+  <script>
+    (function() {
+      // Tab switching
+      document.querySelectorAll('.stage-tab').forEach(function(tab) {
+        tab.addEventListener('click', function() {
+          var targetId = tab.getAttribute('data-tab');
+          var container = tab.closest('.block');
+          container.querySelectorAll('.stage-tab').forEach(function(t) { t.classList.remove('active'); });
+          container.querySelectorAll('.stage-panel').forEach(function(p) { p.classList.remove('active'); });
+          tab.classList.add('active');
+          var panel = document.getElementById(targetId);
+          if (panel) panel.classList.add('active');
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

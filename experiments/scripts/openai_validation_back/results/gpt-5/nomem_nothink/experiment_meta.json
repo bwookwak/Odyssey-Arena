@@ -1,0 +1,18 @@
+{
+  "experiment_id": "exp_20260219_112002_618967",
+  "name": "gpt-5-nomem_nothink",
+  "status": "failed",
+  "started_at": "2026-02-19T11:20:02.619000Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-5",
+    "memory": "nomem",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-19T11:20:28.397560Z"
+}

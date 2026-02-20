@@ -1,0 +1,28 @@
+{
+  "experiment_id": "exp_20260219_072602_681446",
+  "name": "gpt-4.1-mini-gated_oracle",
+  "status": "completed",
+  "started_at": "2026-02-19T07:26:02.681481Z",
+  "config_summary": {
+    "env": "light",
+    "agent": "llm",
+    "model": "gpt-4.1-mini",
+    "memory": "gated",
+    "verification_mode": "oracle",
+    "intervention": "none",
+    "num_episodes": 30,
+    "max_steps": 200,
+    "seed": 42
+  },
+  "finished_at": "2026-02-19T08:01:02.559412Z",
+  "summary": {
+    "num_episodes": 30,
+    "num_success": 1,
+    "success_rate": 0.03333333333333333,
+    "avg_steps_all": 27.4,
+    "avg_steps_success": 22.0,
+    "avg_loop_ratio": 0.4133171171131839,
+    "avg_memory_usage_rate": 0.8627975702418377,
+    "avg_invalid_action_rate": 0.0
+  }
+}

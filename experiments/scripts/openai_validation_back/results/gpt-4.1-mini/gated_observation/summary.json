@@ -1,0 +1,10 @@
+{
+  "num_episodes": 30,
+  "num_success": 0,
+  "success_rate": 0.0,
+  "avg_steps_all": 24.833333333333332,
+  "avg_steps_success": 0.0,
+  "avg_loop_ratio": 0.4120595364559615,
+  "avg_memory_usage_rate": 0.9410405314021492,
+  "avg_invalid_action_rate": 0.0
+}

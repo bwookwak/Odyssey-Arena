@@ -8,6 +8,7 @@ Implements baseline agents:
 """
 
 from typing import Optional, Dict, Any, List
+import asyncio
 import random
 from .prompts import PromptBuilder
 
@@ -36,6 +37,19 @@ class Agent:
             - raw_output: raw output from agent (for logging)
         """
         raise NotImplementedError
+
+    async def async_select_action(
+        self,
+        obs: str,
+        num_actions: int,
+        step: int,
+        memory_context: Optional[str] = None,
+        **kwargs
+    ) -> tuple:
+        """Async version of select_action. Default: runs sync version in thread."""
+        return await asyncio.to_thread(
+            self.select_action, obs, num_actions, step, memory_context, **kwargs
+        )
 
 
 class RandomAgent(Agent):
@@ -104,6 +118,9 @@ class LLMAgent(Agent):
         max_history: Optional[int] = None,
         prompt_template: str = "research",
         think_in_history: str = "last",
+        latent_rule_guide: bool = True,
+        include_raw_output: bool = False,
+        parse_action_retries: int = 10,
     ):
         """
         Args:
@@ -116,6 +133,12 @@ class LLMAgent(Agent):
                 'all'  - every step's think is shown
                 'last' - only the most recent step's think is shown (default)
                 'none' - think is never shown in history
+            latent_rule_guide: Whether to include the Latent Rule Guide section in prompts (default: True)
+            include_raw_output: Whether to include the previous step's full raw output
+                                (think text + action tag) in the prompt. Default: False.
+            parse_action_retries: Max number of LLM call retries when action parsing fails.
+                                  If all retries are exhausted, returns (None, ...) so the
+                                  caller can abort the episode. Default: 10.
         """
         super().__init__(seed)
         self.llm_client = llm_client
@@ -124,9 +147,15 @@ class LLMAgent(Agent):
         self.max_history = max_history
         self.prompt_template = prompt_template
         self.think_in_history = think_in_history  # 'all' | 'last' | 'none'
-        
+        self.parse_action_retries = parse_action_retries
+
         # Prompt builder
-        self.prompt_builder = PromptBuilder(env_type=env_type, template=prompt_template)
+        self.prompt_builder = PromptBuilder(
+            env_type=env_type,
+            template=prompt_template,
+            latent_rule_guide=latent_rule_guide,
+            include_raw_output=include_raw_output,
+        )
         
         # Episode history for context
         self.history = []
@@ -135,33 +164,25 @@ class LLMAgent(Agent):
         """Reset episode-specific state."""
         self.history = []
     
-    def select_action(
+    def _build_prompt_for_step(
         self,
         obs: str,
         num_actions: int,
         step: int,
-        memory_context: Optional[str] = None,
-        **kwargs
-    ) -> tuple:
-        """
-        Select action using LLM.
-        
-        Args:
-            obs: Current observation
-            num_actions: Number of valid actions
-            step: Current step number
-            memory_context: Optional memory context string
-            **kwargs: Additional arguments (unused)
-            
-        Returns:
-            (action, raw_output) tuple
-        """
-        # Build prompt
+        memory_context: Optional[str],
+    ) -> str:
+        """Build the prompt for the current step (extracted for async reuse)."""
         if self.history:
-            history_window = self.history[-self.max_history:] if self.max_history is not None else list(self.history)
-            # Apply think_in_history filter
+            history_window = (
+                self.history[-self.max_history:]
+                if self.max_history is not None
+                else list(self.history)
+            )
             if self.think_in_history == 'none':
-                history_window = [{k: v for k, v in h.items() if k != 'think'} for h in history_window]
+                history_window = [
+                    {k: v for k, v in h.items() if k != 'think'}
+                    for h in history_window
+                ]
             elif self.think_in_history == 'last':
                 history_window = [
                     h if i == len(history_window) - 1
@@ -171,26 +192,112 @@ class LLMAgent(Agent):
             # 'all': keep as-is
         else:
             history_window = None
-        prompt = self.prompt_builder.build_prompt(
+        return self.prompt_builder.build_prompt(
             observation=obs,
             num_actions=num_actions,
             step=step,
             memory_context=memory_context,
-            history=history_window
+            history=history_window,
         )
 
-        # Generate with LLM
-        try:
-            raw_output = self.llm_client.generate(prompt)
-        except Exception as e:
-            print(f"LLM generation error: {e}")
-            action = self.rng.randint(0, num_actions - 1)
-            return action, f"error:fallback_random:{action}", {"model_input": prompt, "think": ""}
+    def select_action(
+        self,
+        obs: str,
+        num_actions: int,
+        step: int,
+        memory_context: Optional[str] = None,
+        **kwargs
+    ) -> tuple:
+        """
+        Select action using LLM with automatic retry.
 
-        # Parse think and action separately
-        think_text, action = self.prompt_builder.parse_think_and_action(raw_output, num_actions)
+        Retries up to self.parse_action_retries times on:
+          - LLM API/network errors
+          - Empty or unparseable LLM responses
+        If all retries are exhausted, returns (None, last_raw_output, {...})
+        so the caller can abort the episode.
 
-        return action, raw_output, {"model_input": prompt, "think": think_text}
+        Returns:
+            3-tuple: (action_or_None, raw_output, {"model_input": ..., "think": ...})
+        """
+        prompt = self._build_prompt_for_step(obs, num_actions, step, memory_context)
+        raw_output = ""
+        think_text = ""
+
+        for attempt in range(1, self.parse_action_retries + 1):
+            # ── LLM call ────────────────────────────────────────────────
+            try:
+                raw_output = self.llm_client.generate(prompt)
+            except Exception as e:
+                print(f"  [LLM_RETRY {attempt}/{self.parse_action_retries}] "
+                      f"API/network error: {e}")
+                continue  # retry
+
+            # ── Empty response ────────────────────────────────────────
+            if not raw_output or not raw_output.strip():
+                print(f"  [LLM_RETRY {attempt}/{self.parse_action_retries}] "
+                      f"Empty response received.")
+                continue  # retry
+
+            # ── Parse ─────────────────────────────────────────────────
+            think_text, action = self.prompt_builder.parse_think_and_action(raw_output, num_actions)
+            if action is not None:
+                return action, raw_output, {"model_input": prompt, "think": think_text}
+
+            print(f"  [LLM_RETRY {attempt}/{self.parse_action_retries}] "
+                  f"Could not parse action from: {raw_output[:120]!r}")
+
+        # All retries exhausted — signal failure to caller (no fallback)
+        return None, raw_output, {"model_input": prompt, "think": think_text}
+
+    async def async_select_action(
+        self,
+        obs: str,
+        num_actions: int,
+        step: int,
+        memory_context: Optional[str] = None,
+        **kwargs
+    ) -> tuple:
+        """
+        Async version of select_action with automatic retry.
+
+        Retries up to self.parse_action_retries times on:
+          - LLM API/network errors
+          - Empty or unparseable LLM responses
+        Returns (None, last_raw_output, {...}) when all retries are exhausted.
+        """
+        prompt = self._build_prompt_for_step(obs, num_actions, step, memory_context)
+        raw_output = ""
+        think_text = ""
+
+        for attempt in range(1, self.parse_action_retries + 1):
+            # ── LLM call ────────────────────────────────────────────────
+            try:
+                if hasattr(self.llm_client, 'async_generate'):
+                    raw_output = await self.llm_client.async_generate(prompt)
+                else:
+                    raw_output = await asyncio.to_thread(self.llm_client.generate, prompt)
+            except Exception as e:
+                print(f"  [LLM_RETRY {attempt}/{self.parse_action_retries}] "
+                      f"API/network error: {e}")
+                continue  # retry
+
+            # ── Empty response ────────────────────────────────────────
+            if not raw_output or not raw_output.strip():
+                print(f"  [LLM_RETRY {attempt}/{self.parse_action_retries}] "
+                      f"Empty response received.")
+                continue  # retry
+
+            # ── Parse ─────────────────────────────────────────────────
+            think_text, action = self.prompt_builder.parse_think_and_action(raw_output, num_actions)
+            if action is not None:
+                return action, raw_output, {"model_input": prompt, "think": think_text}
+
+            print(f"  [LLM_RETRY {attempt}/{self.parse_action_retries}] "
+                  f"Could not parse action from: {raw_output[:120]!r}")
+
+        # All retries exhausted — signal failure to caller (no fallback)
+        return None, raw_output, {"model_input": prompt, "think": think_text}
     
     def record_step(
         self,
@@ -201,6 +308,8 @@ class LLMAgent(Agent):
         feedback: str,
         done: bool,
         think: str = "",
+        invalid_output: str = "",
+        raw_output: str = "",
     ):
         """
         Record step in history for future context.
@@ -213,6 +322,8 @@ class LLMAgent(Agent):
             feedback: Feedback from environment
             done: Whether episode ended
             think: Model reasoning text (included in history if include_think_in_history=True)
+            invalid_output: Raw LLM output that failed to parse (non-empty when action was invalid)
+            raw_output: Full raw LLM output (think + action tag, the complete response)
         """
         result = "Success!" if done else feedback
         entry: Dict[str, Any] = {
@@ -224,6 +335,10 @@ class LLMAgent(Agent):
         }
         if think:
             entry['think'] = think  # always stored internally; filtering done at prompt-build time
+        if invalid_output:
+            entry['invalid_output'] = invalid_output
+        if raw_output:
+            entry['raw_output'] = raw_output
         self.history.append(entry)
 
 
@@ -235,6 +350,7 @@ def create_agent(
     prompt_template: str = "research",
     max_history: Optional[int] = None,
     think_in_history: str = "last",
+    latent_rule_guide: bool = True,
     **kwargs
 ) -> Agent:
     """
@@ -247,7 +363,8 @@ def create_agent(
         seed: Random seed
         prompt_template: Prompt template ('research' or 'original')
         max_history: Max history steps in prompt (None = all)
-        include_think_in_history: Include model reasoning in history context
+        think_in_history: How to include model reasoning in history context
+        latent_rule_guide: Whether to include the Latent Rule Guide in prompts (default: True)
         **kwargs: Additional arguments for agent
 
     Returns:
@@ -261,6 +378,7 @@ def create_agent(
             prompt_template=prompt_template,
             max_history=max_history,
             think_in_history=think_in_history,
+            latent_rule_guide=latent_rule_guide,
             **kwargs
         )
     elif agent_type == 'random':
